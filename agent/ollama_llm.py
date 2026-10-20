@@ -17,6 +17,8 @@ from pathlib import Path
 import httpx
 from langsmith import traceable
 
+from . import llm_http
+
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 
 
@@ -91,7 +93,7 @@ class OllamaLLM:
         self.model = model
         self.usd_per_1k = usd_per_1k_tokens
 
-    def _chat(self, system: str, user: str, schema: dict | None = None) -> tuple[str, dict]:
+    async def _chat(self, system: str, user: str, schema: dict | None = None) -> tuple[str, dict]:
         payload = {
             "model": self.model,
             "messages": [{"role": "system", "content": system},
@@ -101,7 +103,7 @@ class OllamaLLM:
         }
         if schema is not None:
             payload["format"] = schema
-        resp = httpx.post(OLLAMA_URL, json=payload, timeout=300.0)
+        resp = await llm_http.post_json(OLLAMA_URL, payload)   # 개선 4: 비동기 (루프 비차단)
         resp.raise_for_status()
         data = resp.json()
         content = data["message"]["content"]
@@ -149,12 +151,12 @@ class OllamaFastLLM(OllamaLLM):
     """분류·계획·단순 대화 전담 (저사양 소형 모델)."""
 
     @traceable(run_type="llm", name="ollama_fast.route")
-    def route(self, query: str) -> tuple[dict, dict]:
+    async def route(self, query: str) -> tuple[dict, dict]:
         system = ("당신은 ICT 운영 지원 라우터다. 사용자 요청을 분류하라. "
                   "장애·성능 저하·지연·진단·모니터링·티켓 등 운영 이슈면 route=incident, "
                   "인사·잡담·일반 질문이면 route=chat. "
                   "needs_analysis는 패턴 비교/통계 분석이 꼭 필요할 때만 true.")
-        content, usage = self._chat(system, query, schema=ROUTE_SCHEMA)
+        content, usage = await self._chat(system, query, schema=ROUTE_SCHEMA)
         try:
             raw = json.loads(content)
             route = raw.get("route") if raw.get("route") in ("chat", "incident") else None
@@ -168,7 +170,7 @@ class OllamaFastLLM(OllamaLLM):
         return result, usage
 
     @traceable(run_type="llm", name="ollama_fast.plan")
-    def plan(self, query: str, procedure_prompt: str) -> tuple[dict, dict]:
+    async def plan(self, query: str, procedure_prompt: str) -> tuple[dict, dict]:
         system = ("당신은 ICT 운영 Supervisor의 planning 노드다. 표준 진단 절차에 따라 "
                   "실행 계획(tasks)을 JSON으로 세워라. "
                   "사용자 요청에 등장한 시스템마다 agent=research task를 하나씩 세워라 "
@@ -176,7 +178,7 @@ class OllamaFastLLM(OllamaLLM):
                   "언급되지 않았으면 auth-service를 기본으로 조사하라). "
                   "패턴 분석이 꼭 필요하다고 판단되면 agent=analysis task를 추가해도 된다.")
         user = f"## 표준 절차\n{procedure_prompt}\n\n## 사용자 요청\n{query}"
-        content, usage = self._chat(system, user, schema=PLAN_SCHEMA)
+        content, usage = await self._chat(system, user, schema=PLAN_SCHEMA)
 
         # 소형 모델 출력에 대한 코드 레벨 정규화 — 스키마는 강제돼도 내용은 흔들릴 수
         # 있으므로(대상 시스템 오타, task 누락/중복) 실행 가능한 형태로 보정한다.
@@ -215,7 +217,7 @@ class OllamaFastLLM(OllamaLLM):
         return result, usage
 
     @traceable(run_type="llm", name="ollama_fast.analyze")
-    def analyze(self, collected: list[dict]) -> tuple[str, dict]:
+    async def analyze(self, collected: list[dict]) -> tuple[str, dict]:
         system = ("당신은 ICT 운영 패턴 분석가다. 여러 시스템의 모니터링 결과를 비교해 "
                   "공통 원인이 의심되는 패턴이 있는지 한두 문장으로 짧게 답하라. "
                   "패턴이 없으면 '특이 패턴 없음'이라고만 답하라.")
@@ -223,7 +225,7 @@ class OllamaFastLLM(OllamaLLM):
         facts = "\n".join(
             f"- {d['system_name']}: 상태={d['status']}, CPU {d['cpu_percent']}%, "
             f"알림 {d['alerts']}" for d in mon) or "(모니터링 데이터 없음)"
-        return self._chat(system, facts)
+        return await self._chat(system, facts)
 
     @traceable(run_type="llm", name="ollama_fast.chat")
     async def chat(self, query: str, history: list[dict], on_token=None) -> tuple[str, dict]:

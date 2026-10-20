@@ -29,7 +29,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import httpx
+from . import llm_http
 
 logger = logging.getLogger("agent.runbook_retriever")
 
@@ -111,10 +111,9 @@ class OllamaEmbedder:
         self.name = f"ollama:{self.model}"
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            r = await client.post(self.url, json={"model": self.model, "input": texts})
-            r.raise_for_status()
-            return r.json()["embeddings"]
+        r = await llm_http.post_json(self.url, {"model": self.model, "input": texts}, timeout=60.0)
+        r.raise_for_status()
+        return r.json()["embeddings"]
 
 
 class OpenAIEmbedder:
@@ -124,12 +123,11 @@ class OpenAIEmbedder:
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         key = os.environ.get("OPENAI_API_KEY", "")
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            r = await client.post("https://api.openai.com/v1/embeddings",
-                                  headers={"Authorization": f"Bearer {key}"},
-                                  json={"model": self.model, "input": texts})
-            r.raise_for_status()
-            return [d["embedding"] for d in r.json()["data"]]
+        base = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+        r = await llm_http.post_json(f"{base}/embeddings", {"model": self.model, "input": texts},
+                                     headers={"Authorization": f"Bearer {key}"}, timeout=60.0)
+        r.raise_for_status()
+        return [d["embedding"] for d in r.json()["data"]]
 
 
 def make_embedder(llm_backend: str):

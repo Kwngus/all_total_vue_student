@@ -28,6 +28,7 @@ from agent.deps import SupervisorDeps
 from agent.errors import to_user_error
 from agent.guardrails import filter_output, guard_input, mask_sensitive
 from agent.fake_llm import FastLLM, QualityLLM
+from agent import llm_http
 from agent.graph import build_graph
 from agent.mcp_client import MCPClient
 from agent.runbook_retriever import RunbookRetriever, make_embedder
@@ -97,6 +98,7 @@ async def lifespan(app: FastAPI):
     app.state.instance_id = id(deps)
     yield
     await mcp.stop()
+    await llm_http.aclose()   # 개선 4: 공용 LLM HTTP 연결 풀 정리
     deps.session_store.close()
     try:   # 종료 전 LangSmith 배치 전송 플러시 — kill 시 run이 pending으로 남는 것 방지
         from langchain_core.tracers.langchain import wait_for_all_tracers
@@ -132,6 +134,7 @@ async def health():
             "llm_backend": app.state.llm_backend,
             "fast_llm": app.state.deps.fast_llm.name,
             "quality_llm": app.state.deps.quality_llm.name,
+            "llm_http_mode": llm_http.mode(),
             "runbook_retriever": (app.state.deps.runbook_retriever.method
                                   if app.state.deps.runbook_retriever else "keyword")}
 
