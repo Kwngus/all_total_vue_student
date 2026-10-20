@@ -36,6 +36,26 @@ BACKEND_DOWN = {"code": "BACKEND_UNAVAILABLE",
                 "error_id": None}
 
 
+@app.get("/admin")
+async def admin_page():
+    return FileResponse(HERE / "admin.html")
+
+
+@app.get("/admin/api/{name}")
+async def proxy_admin(name: str, req: Request):
+    """관리자 API 중계 — 브라우저가 보낸 X-Admin-Token 헤더를 그대로 백엔드로 전달한다."""
+    if name not in ("metrics", "requests"):
+        return JSONResponse({"error": {"code": "NOT_FOUND", "message": "없는 API", "error_id": None}},
+                            status_code=404)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{BACKEND}/admin/{name}", params=dict(req.query_params),
+                                 headers={"x-admin-token": req.headers.get("x-admin-token", "")})
+    except httpx.HTTPError:
+        return JSONResponse({"error": BACKEND_DOWN}, status_code=503)
+    return JSONResponse(r.json(), status_code=r.status_code)
+
+
 @app.get("/health")
 async def proxy_health():
     try:

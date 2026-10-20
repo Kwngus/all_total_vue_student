@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>운영 에이전트 관리자 대시보드</title>
+<style>
+  :root { color-scheme: dark;
+    --bg: #1e1e2e; --panel: #262638; --line: #3a3a52; --text: #e2e2f0; --muted: #9a9ac0;
+    --accent: #5b5bd6; --ok: #4fb286; --warn: #d9a441; --err: #d0525c; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Apple SD Gothic Neo", sans-serif;
+         background: var(--bg); color: var(--text); font-size: 14px; }
+  header { padding: 14px 24px; background: var(--panel); border-bottom: 1px solid var(--line);
+           display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  .badges { display: flex; gap: 6px; flex-wrap: wrap; }
+  .badge { font-size: 11px; padding: 3px 8px; border-radius: 999px; background: #33334d; color: #c3c3e0; }
+  .badge.on { background: #23463a; color: #9fe3c4; }
+  .badge.off { background: #4a2a2e; color: #ffc2c7; }
+  .spacer { flex: 1; }
+  select, input, button { font: inherit; color: var(--text); background: var(--bg);
+           border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
+  button { background: var(--accent); border: none; cursor: pointer; }
+  button.ghost { background: transparent; border: 1px solid var(--line); }
+  main { padding: 20px 24px 40px; display: flex; flex-direction: column; gap: 16px; max-width: 1400px; margin: 0 auto; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .kpi .label { color: var(--muted); font-size: 12px; }
+  .kpi .value { font-size: 24px; font-weight: 650; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .kpi .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .kpi.good .value { color: var(--ok); } .kpi.warn .value { color: var(--warn); } .kpi.bad .value { color: var(--err); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); gap: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; min-width: 0; }
+  .card h2 { font-size: 13px; margin: 0 0 12px; color: #c3c3e0; font-weight: 600; }
+  .card .hint { color: var(--muted); font-size: 11px; margin: -6px 0 10px; }
+  .hourly { display: flex; align-items: flex-end; gap: 6px; height: 140px; }
+  .hourly .col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; height: 100%; }
+  .hourly .stack { flex: 1; width: 100%; display: flex; flex-direction: column-reverse; }
+  .hourly .seg.ok { background: var(--ok); } .hourly .seg.rejected { background: var(--warn); }
+  .hourly .seg.error { background: var(--err); }
+  .hourly .seg:last-child { border-radius: 3px 3px 0 0; }
+  .hourly .x { font-size: 10px; color: var(--muted); }
+  .legend { display: flex; gap: 12px; font-size: 11px; color: var(--muted); margin-top: 8px; }
+  .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; }
+  .bars { display: flex; flex-direction: column; gap: 8px; }
+  .bar { display: grid; grid-template-columns: 140px 1fr 40px; align-items: center; gap: 8px; font-size: 12px; }
+  .bar .track { background: #1a1a28; border-radius: 4px; height: 10px; overflow: hidden; }
+  .bar .fill { background: var(--accent); height: 100%; border-radius: 4px; }
+  .bar .fill.warn { background: var(--warn); } .bar .fill.err { background: var(--err); } .bar .fill.ok { background: var(--ok); }
+  .bar .n { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .empty { color: var(--muted); font-size: 12px; padding: 8px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #30304a; vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--panel); }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.q { max-width: 360px; color: #d0d0ea; }
+  .st { padding: 2px 7px; border-radius: 999px; font-size: 11px; white-space: nowrap; }
+  .st.ok { background: #23463a; color: #9fe3c4; } .st.rejected { background: #4a3e22; color: #f3d38f; }
+  .st.error { background: #4a2a2e; color: #ffc2c7; }
+  .scroll { max-height: 460px; overflow: auto; }
+  .login { max-width: 380px; margin: 12vh auto; background: var(--panel); border: 1px solid var(--line);
+           border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 12px; }
+  .login p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+  .err-msg { color: #ffc2c7; font-size: 12px; }
+  .mask { color: #9fe3c4; }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- 로그인 -->
+  <form v-if="!authed" class="login" @submit.prevent="login">
+    <h1 style="font-size:16px;margin:0">관리자 로그인</h1>
+    <p>.env의 <code>ADMIN_TOKEN</code> 값을 입력하세요. 토큰은 이 탭(sessionStorage)에만 보관되고 닫으면 사라집니다.</p>
+    <input v-model="tokenInput" type="password" placeholder="ADMIN_TOKEN" autocomplete="current-password" />
+    <button type="submit">접속</button>
+    <div v-if="error" class="err-msg">{{ error }}</div>
+  </form>
+
+  <template v-else>
+    <header>
+      <h1>운영 에이전트 관리자 대시보드</h1>
+      <div class="badges" v-if="config">
+        <span class="badge">LLM {{ config.llm_backend }} · {{ config.fast_llm }} / {{ config.quality_llm }}</span>
+        <span class="badge">runbook {{ config.runbook_retriever }}</span>
+        <span class="badge" :class="config.llm_http_mode === 'async' ? 'on' : 'off'">HTTP {{ config.llm_http_mode }}</span>
+        <span class="badge" :class="config.grounding_check ? 'on' : 'off'">근거 검증 {{ config.grounding_check ? 'ON' : 'OFF' }}</span>
+      </div>
+      <div class="spacer"></div>
+      <select v-model.number="hours" @change="refresh">
+        <option :value="1">최근 1시간</option>
+        <option :value="24">최근 24시간</option>
+        <option :value="168">최근 7일</option>
+      </select>
+      <span style="color:var(--muted);font-size:12px">{{ updatedAt }} 갱신 · 5초 자동</span>
+      <button class="ghost" @click="logout">로그아웃</button>
+    </header>
+
+    <main v-if="s">
+      <div v-if="error" class="err-msg">{{ error }}</div>
+
+      <section class="kpis">
+        <div class="kpi"><div class="label">총 요청</div><div class="value">{{ s.total }}</div>
+          <div class="sub">성공 {{ s.ok }} · 거절 {{ s.rejected }} · 오류 {{ s.error }}</div></div>
+        <div class="kpi" :class="s.success_rate === null ? '' : s.success_rate >= 0.95 ? 'good' : s.success_rate >= 0.8 ? 'warn' : 'bad'">
+          <div class="label">성공률</div><div class="value">{{ s.success_rate === null ? '–' : (s.success_rate * 100).toFixed(1) + '%' }}</div>
+          <div class="sub">정책 거절은 실패에서 제외</div></div>
+        <div class="kpi"><div class="label">평균 응답</div><div class="value">{{ sec(s.latency_avg_ms) }}</div>
+          <div class="sub">p95 {{ sec(s.latency_p95_ms) }}</div></div>
+        <div class="kpi"><div class="label">추정 비용</div><div class="value">${{ s.cost_usd.toFixed(4) }}</div>
+          <div class="sub">실측 토큰 × 가상 단가</div></div>
+        <div class="kpi" :class="s.rejected ? 'warn' : ''"><div class="label">정책 거절</div><div class="value">{{ s.rejected }}</div>
+          <div class="sub">LLM 호출 전에 차단 → 과금 0</div></div>
+        <div class="kpi" :class="s.error ? 'bad' : ''"><div class="label">오류</div><div class="value">{{ s.error }}</div>
+          <div class="sub">문의 번호로 로그 추적</div></div>
+        <div class="kpi"><div class="label">마스킹된 요청</div><div class="value mask">{{ s.masked_requests }}</div>
+          <div class="sub">민감정보가 LLM·DB로 가지 않음</div></div>
+        <div class="kpi" :class="s.grounding_warnings ? 'warn' : ''"><div class="label">근거 경고 답변</div><div class="value">{{ s.grounding_warnings }}</div>
+          <div class="sub">평균 검수 {{ s.avg_validation_attempts }}회</div></div>
+      </section>
+
+      <section class="grid">
+        <div class="card">
+          <h2>시간대별 요청 (최근 12시간)</h2>
+          <div class="hourly">
+            <div class="col" v-for="b in s.hourly" :key="b.hour" :title="`${b.hour} — 성공 ${b.ok} · 거절 ${b.rejected} · 오류 ${b.error}`">
+              <div class="stack">
+                <div v-for="k in ['ok','rejected','error']" :key="k" class="seg" :class="k"
+                     :style="{height: (b[k] / hourMax * 100) + '%'}"></div>
+              </div>
+              <div class="x">{{ b.hour }}</div>
+            </div>
+          </div>
+          <div class="legend"><span><i style="background:var(--ok)"></i>성공</span>
+            <span><i style="background:var(--warn)"></i>정책 거절</span><span><i style="background:var(--err)"></i>오류</span></div>
+        </div>
+
+        <div class="card">
+          <h2>거절·오류 코드</h2>
+          <div class="hint">사용자에게는 안내 문구만, 관리자는 여기서 원인 분류를 본다</div>
+          <div class="bars" v-if="entries(s.codes).length">
+            <div class="bar" v-for="[k, n] in entries(s.codes)" :key="k">
+              <span>{{ CODE_LABELS[k] || k }}</span>
+              <div class="track"><div class="fill" :class="REJECT_CODES.includes(k) ? 'warn' : 'err'" :style="{width: pct(n, s.codes)}"></div></div>
+              <span class="n">{{ n }}</span>
+            </div>
+          </div>
+          <div v-else class="empty">거절·오류 없음</div>
+        </div>
+
+        <div class="card">
+          <h2>runbook 선택 분포 (장애 답변)</h2>
+          <div class="hint">선택 방식: <span v-for="[k, n] in entries(s.runbook_methods)" :key="k" style="margin-right:8px">{{ METHOD_LABELS[k] || k }} {{ n }}건</span></div>
+          <div class="bars" v-if="entries(s.runbooks).length">
+            <div class="bar" v-for="[k, n] in entries(s.runbooks)" :key="k">
+              <span>{{ k }}</span>
+              <div class="track"><div class="fill" :style="{width: pct(n, s.runbooks)}"></div></div>
+              <span class="n">{{ n }}</span>
+            </div>
+          </div>
+          <div v-else class="empty">아직 장애 답변 없음</div>
+        </div>
+
+        <div class="card">
+          <h2>마스킹 유형 · 요청 분류</h2>
+          <div class="bars">
+            <div class="bar" v-for="[k, n] in entries(s.masked_types)" :key="'m' + k">
+              <span>🔒 {{ MASK_LABELS[k] || k }}</span>
+              <div class="track"><div class="fill ok" :style="{width: pct(n, s.masked_types)}"></div></div>
+              <span class="n">{{ n }}</span>
+            </div>
+            <div v-if="!entries(s.masked_types).length" class="empty">마스킹된 요청 없음</div>
+            <div class="bar" v-for="[k, n] in entries(s.routes)" :key="'r' + k">
+              <span>{{ k === 'incident' ? '장애 진단' : k === 'chat' ? '일반 대화' : k }}</span>
+              <div class="track"><div class="fill" :style="{width: pct(n, s.routes)}"></div></div>
+              <span class="n">{{ n }}</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>최근 요청 {{ requests.length }}건</h2>
+        <div class="hint">질문은 가드레일을 통과한 마스킹본만 저장된다 — 관리자도 원문 민감정보를 볼 수 없음</div>
+        <div class="scroll">
+          <table>
+            <thead><tr><th>시각</th><th>상태</th><th>질문</th><th>분류</th><th>runbook</th>
+              <th>검수</th><th class="num">응답</th><th class="num">비용</th><th>문의 번호</th></tr></thead>
+            <tbody>
+              <tr v-for="r in requests" :key="r.id">
+                <td style="white-space:nowrap">{{ r.ts.slice(5).replace('T', ' ') }}<br><span style="color:var(--muted)">{{ r.channel }}</span></td>
+                <td><span class="st" :class="r.status">{{ r.status === 'ok' ? '성공' : r.status === 'rejected' ? '거절' : '오류' }}</span>
+                  <div v-if="r.code" style="color:var(--muted);margin-top:3px">{{ CODE_LABELS[r.code] || r.code }}</div></td>
+                <td class="q">{{ r.query || '(저장 안 함)' }}
+                  <div v-if="r.masked.length" class="mask" style="margin-top:3px">🔒 {{ r.masked.map(m => MASK_LABELS[m] || m).join(', ') }}</div></td>
+                <td>{{ r.route === 'incident' ? '장애' : r.route === 'chat' ? '대화' : '–' }}</td>
+                <td>{{ r.runbooks.join(', ') || '–' }}<div v-if="r.runbook_method" style="color:var(--muted)">{{ METHOD_LABELS[r.runbook_method] || r.runbook_method }}</div></td>
+                <td>{{ r.validation_attempts || '–' }}<span v-if="r.ungrounded" class="st rejected" style="margin-left:4px">⚠️ 근거</span></td>
+                <td class="num">{{ sec(r.latency_ms) }}</td>
+                <td class="num">{{ r.cost_usd ? '$' + r.cost_usd.toFixed(5) : '–' }}</td>
+                <td style="color:var(--muted)">{{ r.error_id || '' }}</td>
+              </tr>
+              <tr v-if="!requests.length"><td colspan="9" class="empty">아직 요청이 없습니다. 채팅 화면(/)에서 질문해 보세요.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </template>
+</div>
+
+<script src="https://unpkg.com/vue@3.4.38/dist/vue.global.prod.js"></script>
+<script>
+const { createApp, ref, computed, onMounted, onUnmounted } = Vue;
+
+const CODE_LABELS = {
+  EMPTY_MESSAGE: '빈 메시지', MESSAGE_TOO_LONG: '길이 초과', PROMPT_INJECTION: '프롬프트 인젝션',
+  LLM_AUTH: 'AI 인증 오류', LLM_RATE_LIMIT: '요청 한도 초과', LLM_UNAVAILABLE: 'AI 서비스 불가',
+  TIMEOUT: '시간 초과', INTERNAL_ERROR: '내부 오류', BACKEND_UNAVAILABLE: '백엔드 다운',
+};
+const REJECT_CODES = ['EMPTY_MESSAGE', 'MESSAGE_TOO_LONG', 'PROMPT_INJECTION'];
+const MASK_LABELS = { API_KEY: 'API 키', JWT: '토큰', BEARER: '토큰', PASSWORD: '비밀번호',
+  RRN: '주민번호', CARD: '카드번호', EMAIL: '이메일', PHONE: '전화번호', IP: 'IP 주소' };
+const METHOD_LABELS = { hybrid: '의미+어휘 검색', lexical: '어휘 검색', keyword: '키워드 규칙' };
+
+function readToken() { try { return sessionStorage.getItem('adminToken') || ''; } catch { return ''; } }
+function saveToken(t) { try { t ? sessionStorage.setItem('adminToken', t) : sessionStorage.removeItem('adminToken'); } catch {} }
+
+createApp({
+  setup() {
+    const token = ref(readToken());
+    const tokenInput = ref('');
+    const authed = ref(false);
+    const error = ref('');
+    const hours = ref(24);
+    const s = ref(null), config = ref(null), requests = ref([]);
+    const updatedAt = ref('');
+    let timer = null;
+
+    async function api(name, params) {
+      const r = await fetch(`/admin/api/${name}?` + new URLSearchParams(params),
+                            { headers: { 'X-Admin-Token': token.value } });
+      const body = await r.json();
+      if (!r.ok) throw Object.assign(new Error(body.error?.message || r.statusText), { status: r.status });
+      return body;
+    }
+
+    async function refresh() {
+      try {
+        const [m, q] = await Promise.all([api('metrics', { hours: hours.value }), api('requests', { limit: 50 })]);
+        s.value = m.summary; config.value = m.config; requests.value = q.requests;
+        authed.value = true; error.value = '';
+        updatedAt.value = new Date().toLocaleTimeString('ko-KR');
+      } catch (e) {
+        if (e.status === 401 || e.status === 503) { authed.value = false; saveToken(''); }
+        error.value = e.message;
+      }
+    }
+
+    function login() { token.value = tokenInput.value.trim(); saveToken(token.value); refresh(); }
+    function logout() { token.value = ''; saveToken(''); authed.value = false; s.value = null; }
+
+    const hourMax = computed(() => Math.max(1, ...(s.value?.hourly || []).map(b => b.ok + b.rejected + b.error)));
+    const entries = obj => Object.entries(obj || {}).sort((a, b) => b[1] - a[1]);
+    const pct = (n, obj) => (n / Math.max(1, ...Object.values(obj || {})) * 100) + '%';
+    const sec = ms => !ms ? '–' : ms < 1000 ? Math.round(ms) + 'ms' : (ms / 1000).toFixed(1) + 's';
+
+    onMounted(() => { if (token.value) refresh(); timer = setInterval(() => authed.value && refresh(), 5000); });
+    onUnmounted(() => clearInterval(timer));
+
+    return { token, tokenInput, authed, error, hours, s, config, requests, updatedAt,
+             refresh, login, logout, hourMax, entries, pct, sec,
+             CODE_LABELS, REJECT_CODES, MASK_LABELS, METHOD_LABELS };
+  },
+}).mount('#app');
+</script>
+</body>
+</html>
