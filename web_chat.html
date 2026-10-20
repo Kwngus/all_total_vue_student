@@ -40,6 +40,8 @@
   }
   .row.user .bubble { background: #5b5bd6; color: white; border-bottom-right-radius: 4px; }
   .row.agent .bubble { background: #2e2e42; border-bottom-left-radius: 4px; }
+  .row.error .bubble { background: #4a1f24; border: 1px solid #c24b55; color: #ffd7da; border-bottom-left-radius: 4px; }
+  .row.error .err-id { display: block; margin-top: 4px; font-size: 11px; opacity: .7; }
   .steps {
     max-width: 70%; font-size: 12px; color: #9a9ac0; padding: 6px 14px;
     display: flex; flex-direction: column; gap: 3px;
@@ -93,6 +95,9 @@
       <div v-else-if="item.kind === 'agent'" class="row agent">
         <div class="bubble">{{ item.text }}</div>
       </div>
+      <div v-else-if="item.kind === 'error'" class="row error">
+        <div class="bubble">⚠️ {{ item.text }}<span v-if="item.errorId" class="err-id">문의 번호: {{ item.errorId }}</span></div>
+      </div>
 
       <details v-else-if="item.kind === 'prompt'" class="prompt-box">
         <summary>LLM에 전달된 최종 프롬프트 보기</summary>
@@ -114,7 +119,13 @@
 <script>
 const { createApp, ref, reactive, nextTick } = Vue;
 
+const MASK_LABELS = { API_KEY: 'API 키', JWT: '토큰', BEARER: '토큰', PASSWORD: '비밀번호',
+  RRN: '주민번호', CARD: '카드번호', EMAIL: '이메일', PHONE: '전화번호', IP: 'IP 주소' };
+
 const STEP_LABELS = {
+  GuardrailApplied: e => e.input_masked?.length
+      ? `🔒 민감정보 마스킹 후 전달 (${[...new Set(e.input_masked.map(t => MASK_LABELS[t] || t))].join(', ')})`
+      : null,
   PlanCreated: e => `계획 수립: 할 일 ${e.task_count}가지${e.targets?.length ? ` (시스템: ${e.targets.join(', ')})` : ''}`,
   GateApplied: e => e.removed_analysis_tasks ? `불필요한 작업 ${e.removed_analysis_tasks}건 제거` : null,
   TaskCompleted: e => (e.source === 'monitoring'
@@ -179,6 +190,13 @@ createApp({
           return;
         }
 
+        if (e.type === 'Error') {
+          log.value.push({ id: nextId++, kind: 'error', text: e.message, errorId: e.error_id });
+          streamItem = null;
+          scrollToBottom();
+          return;
+        }
+
         if (e.type === 'FinalAnswer') {
           if (!streamItem) {
             streamItem = reactive({ id: nextId++, kind: 'agent', text: '' });
@@ -200,7 +218,15 @@ createApp({
         scrollToBottom();
       };
 
-      es.onerror = () => { es.close(); sending.value = false; };
+      es.onerror = () => {
+        // 정상 종료([DONE]) 전에 연결이 끊긴 경우 — 서버 다운·네트워크 단절
+        if (sending.value) {
+          log.value.push({ id: nextId++, kind: 'error',
+                           text: '서버와의 연결이 끊어졌습니다. 잠시 후 다시 시도해 주세요.' });
+          scrollToBottom();
+        }
+        es.close(); sending.value = false;
+      };
     }
 
     return { backendLabel, log, input, sending, logEl, onSubmit };

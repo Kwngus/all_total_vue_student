@@ -12,6 +12,7 @@ server.py는 평소처럼(fake/ollama/openai 아무 백엔드로나) 8100에 미
 실행:
     python3 web_demo_server.py        # http://localhost:8600 에서 채팅 화면 오픈
 """
+import json
 from pathlib import Path
 
 import httpx
@@ -30,32 +31,47 @@ async def index():
     return FileResponse(HERE / "web_chat.html")
 
 
+BACKEND_DOWN = {"code": "BACKEND_UNAVAILABLE",
+                "message": "에이전트 서버에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+                "error_id": None}
+
+
 @app.get("/health")
 async def proxy_health():
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.get(f"{BACKEND}/health")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{BACKEND}/health")
+    except httpx.HTTPError:
+        return JSONResponse({"error": BACKEND_DOWN}, status_code=503)
     return JSONResponse(r.json(), status_code=r.status_code)
 
 
 @app.post("/chat")
 async def proxy_chat(req: Request):
     body = await req.body()
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        r = await client.post(f"{BACKEND}/chat", content=body,
-                              headers={"content-type": "application/json"})
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            r = await client.post(f"{BACKEND}/chat", content=body,
+                                  headers={"content-type": "application/json"})
+    except httpx.HTTPError:   # 백엔드(8100)가 꺼져 있거나 응답이 없을 때
+        return JSONResponse({"error": BACKEND_DOWN}, status_code=503)
     return JSONResponse(r.json(), status_code=r.status_code)
 
 
 @app.get("/chat/stream")
 async def proxy_stream(message: str, thread_id: str = "web-demo"):
     async def relay():
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream(
-                "GET", f"{BACKEND}/chat/stream",
-                params={"message": message, "thread_id": thread_id},
-            ) as upstream:
-                async for chunk in upstream.aiter_bytes():
-                    yield chunk
+        try:
+            async with httpx.AsyncClient(timeout=None) as client:
+                async with client.stream(
+                    "GET", f"{BACKEND}/chat/stream",
+                    params={"message": message, "thread_id": thread_id},
+                ) as upstream:
+                    async for chunk in upstream.aiter_bytes():
+                        yield chunk
+        except httpx.HTTPError:   # 연결 실패도 SSE Error 이벤트로 바꿔 화면에 표시
+            yield f"data: {json.dumps({'type': 'Error', **BACKEND_DOWN}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(relay(), media_type="text/event-stream")
 
