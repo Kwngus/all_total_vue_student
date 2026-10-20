@@ -24,7 +24,7 @@ class UserFacingError:
     status: int        # HTTP 상태 코드 (/chat용)
     code: str          # 프론트·대시보드가 분기할 수 있는 고정 코드
     message: str       # 사용자에게 그대로 보여줄 한국어 문구
-    error_id: str      # 서버 로그와 연결하는 추적 번호
+    error_id: str | None   # 서버 로그와 연결하는 추적 번호 (정책 거절은 None)
 
     def to_body(self) -> dict:
         return {"error": {"code": self.code, "message": self.message,
@@ -50,7 +50,8 @@ def to_user_error(exc: BaseException) -> UserFacingError:
     error_id = uuid.uuid4().hex[:8]
 
     if isinstance(exc, GuardrailViolation):   # 정책 위반은 '오류'가 아니라 정상적인 거절
-        return UserFacingError(400, exc.code, exc.user_message, error_id)
+        # 서버 로그에 남길 원인이 없으므로 문의 번호도 발급하지 않는다
+        return UserFacingError(400, exc.code, exc.user_message, None)
 
     if (e := _find(exc, httpx.HTTPStatusError)) is not None:
         status = e.response.status_code

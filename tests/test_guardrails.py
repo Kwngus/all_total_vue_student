@@ -74,6 +74,14 @@ def test_invalid_input_is_rejected_before_llm(msg, code):
     assert ei.value.code == code
 
 
+def test_guardrail_rejection_has_no_error_id():
+    """정책 거절은 서버 오류가 아니므로 문의 번호를 주지 않는다."""
+    with pytest.raises(GuardrailViolation) as ei:
+        guard_input("")
+    err = to_user_error(ei.value)
+    assert (err.status, err.error_id) == (400, None)
+
+
 def test_valid_input_passes_and_is_trimmed():
     assert guard_input("  auth-service 장애  ").text == "auth-service 장애"
 
