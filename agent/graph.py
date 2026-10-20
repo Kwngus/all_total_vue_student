@@ -19,6 +19,7 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, StateGraph
 from langsmith import traceable
 
+from . import grounding
 from .deps import SupervisorDeps
 from .retry import with_retry
 
@@ -64,6 +65,7 @@ class AgentState(TypedDict, total=False):
     validation_feedback: str
     final: str
     last_prompt: str
+    ungrounded: list[str]   # 개선 5 — 수집 데이터로 확인되지 않은 답변 속 수치
     cost_usd: float
     events: list[dict]
 
@@ -288,24 +290,43 @@ async def write_node(state: AgentState, deps: SupervisorDeps) -> dict:
 
 @traceable(name="validate_node")
 async def validate_node(state: AgentState, deps: SupervisorDeps) -> dict:
-    """Wave 8 — 코드 기준 검증: 30자 이상 + 절차 번호 포함이어야 합격."""
+    """Wave 8 — 코드 기준 검증: 30자 이상 + 절차 번호 포함이어야 합격.
+    개선 5 — 형식에 더해 '답변 속 수치가 수집된 데이터에 실제로 있는가'를 검사한다.
+    근거 없는 수치가 있으면 그 숫자를 짚어서 반려 → write가 피드백을 반영해 재작성."""
     draft = state["draft"]
     attempts = state.get("validation_attempts", 0) + 1
-    ok = len(draft) >= 30 and "1)" in draft
+    problems = []
+    if not (len(draft) >= 30 and "1)" in draft):
+        problems.append(f"응답이 너무 짧거나 형식이 맞지 않습니다({len(draft)}자, 최소 30자). "
+                        f"절차를 1) 2) 3) 번호로 구체적으로 설명하세요.")
+    ungrounded = []
+    if grounding.enabled():
+        fact_text = grounding.build_fact_text(state["query"], state.get("collected", []),
+                                              state.get("last_prompt"))
+        ungrounded = grounding.find_ungrounded(draft, fact_text)
+        if ungrounded:
+            problems.append(f"다음 수치는 수집된 데이터에 없습니다: {', '.join(ungrounded)}. "
+                            f"수치를 추정하거나 계산하지 말고 '수집된 사실'에 있는 값만 그대로 "
+                            f"인용하세요. 근거가 없으면 수치 없이 서술하세요.")
+    ok = not problems
     verdict = "합격" if ok else "불합격"
     if not ok and attempts >= 3:   # 실모델 무한 재작성 방지 — 최대 3회 후 통과 처리
         ok, verdict = True, "합격(최대 시도 도달 — 통과 처리)"
-    feedback = None if ok else (
-        f"응답이 너무 짧습니다({len(draft)}자, 최소 30자). 절차를 1) 2) 3) 번호로 "
-        f"구체적으로 설명하세요.")
-    event = {"type": "Validation", "attempt": attempts, "verdict": verdict}
+    feedback = None if ok else " / ".join(problems)
+    event = {"type": "Validation", "attempt": attempts, "verdict": verdict,
+             "ungrounded": ungrounded}
     return {"validation_attempts": attempts, "validation_feedback": feedback,
-            "events": state["events"] + [event]}
+            "ungrounded": ungrounded, "events": state["events"] + [event]}
 
 
 @traceable(name="finalize_node")
 async def finalize_node(state: AgentState, deps: SupervisorDeps) -> dict:
-    return {"final": state["draft"],
+    """개선 5 — 재작성 한도까지 써도 근거 없는 수치가 남으면, 조용히 내보내지 않고
+    답변 끝에 '확인 필요' 경고를 붙여 사용자가 그 숫자를 그대로 믿지 않게 한다."""
+    final = state["draft"]
+    if state.get("ungrounded"):
+        final += grounding.warning_line(state["ungrounded"])
+    return {"final": final,
             "events": state["events"] + [{"type": "Finalize", "pipeline": "incident-v2"}]}
 
 

@@ -135,7 +135,9 @@ const STEP_LABELS = {
       : `정보 부족 → 장애유형 "${e.target}"로 추가 조사` + (e.method ? ` (선택 방식: ${
           {hybrid: '의미+어휘 검색', lexical: '어휘 검색', keyword: '키워드 규칙'}[e.method] || e.method})` : ''),
   DraftWritten: e => `답변 초안 작성 (시도 ${e.attempt})`,
-  Validation: e => e.verdict === '합격' ? '검수 통과' : '검수 반려 → 다시 작성',
+  Validation: e => e.verdict.startsWith('합격')
+      ? (e.ungrounded?.length ? `검수 종료 (근거 없는 수치 ${e.ungrounded.length}개 남음 → 경고 표시)` : '검수 통과')
+      : (e.ungrounded?.length ? `검수 반려: 근거 없는 수치 ${e.ungrounded.join(', ')} → 다시 작성` : '검수 반려 → 다시 작성'),
   Finalize: () => '최종 답변 완성',
 };
 

@@ -39,6 +39,7 @@ CREATION_COUNT = 0   # Wave 1 — 프로세스 내 Agent 번들 생성 횟수 (�
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s | %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)   # 요청마다 찍히는 HTTP 로그는 숨김
 
 # thread_id는 DB 조회 키로 쓰이므로 형식을 제한한다 (영문·숫자·_·- 만, 64자 이내).
 THREAD_ID_PATTERN = r"^[A-Za-z0-9_\-]{1,64}$"
