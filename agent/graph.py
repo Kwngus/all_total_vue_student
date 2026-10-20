@@ -213,20 +213,35 @@ def _classify_incident_type(collected: list[dict]) -> str:
     return "db-down"   # 매칭되는 증상이 없으면 가장 일반적인 장애 대응 절차로 폴백
 
 
+@traceable(name="select_runbooks")
+async def select_runbooks(query: str, collected: list[dict], retriever) -> dict:
+    """개선 3 — runbook 선택. retriever가 있으면 하이브리드 검색(사용자 질문 + 이상 알림),
+    없으면 기존 키워드 규칙. LangSmith에 후보별 점수가 함께 기록돼 '왜 이 runbook인지' 추적된다."""
+    if retriever is None:
+        return {"selected": [_classify_incident_type(collected)], "method": "keyword",
+                "scores": {}}
+    r = await retriever.search_collected(query, collected)
+    return {"selected": r.selected, "method": r.method, "scores": r.scores, **r.detail}
+
+
 @traceable(name="replan_check_node")
 async def replan_check_node(state: AgentState, deps: SupervisorDeps) -> dict:
-    """Wave 7 — 1차 수집 결과 평가. runbook이 없으면 gap task만 추가해 재조사."""
+    """Wave 7 — 1차 수집 결과 평가. runbook이 없으면 gap task만 추가해 재조사.
+    개선 3: 복합 장애면 runbook gap task를 최대 2개까지 만든다."""
     has_runbook = any(c["source"] == "runbook" for c in state.get("collected", []))
     rounds = state.get("replan_rounds", 0)
     if has_runbook or rounds >= 1:
         verdict = {"type": "ReplanCheck", "round": rounds, "is_sufficient": True}
         return {"events": state["events"] + [verdict]}
-    incident_type = _classify_incident_type(state.get("collected", []))
-    gap_task = {"id": "task-gap-runbook", "agent": "research", "kind": "runbook",
-                "target": incident_type, "status": "pending"}
+    picked = await select_runbooks(state["query"], state.get("collected", []),
+                                   deps.runbook_retriever)
+    gap_tasks = [{"id": f"task-gap-runbook-{i}", "agent": "research", "kind": "runbook",
+                  "target": t, "status": "pending"} for i, t in enumerate(picked["selected"])]
     verdict = {"type": "ReplanCheck", "round": rounds, "is_sufficient": False,
-               "gap_task": gap_task["id"], "target": incident_type}
-    return {"tasks": state["tasks"] + [gap_task], "replan_rounds": rounds + 1,
+               "gap_task": [t["id"] for t in gap_tasks],
+               "target": ", ".join(picked["selected"]),
+               "method": picked["method"], "scores": picked["scores"]}
+    return {"tasks": state["tasks"] + gap_tasks, "replan_rounds": rounds + 1,
             "events": state["events"] + [verdict]}
 
 

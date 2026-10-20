@@ -30,6 +30,7 @@ from agent.guardrails import filter_output, guard_input, mask_sensitive
 from agent.fake_llm import FastLLM, QualityLLM
 from agent.graph import build_graph
 from agent.mcp_client import MCPClient
+from agent.runbook_retriever import RunbookRetriever, make_embedder
 from agent.session_store import SqliteSessionStore
 from agent.supervisor_v1 import run_v1
 
@@ -77,12 +78,19 @@ async def lifespan(app: FastAPI):
     await mcp.start()   # Wave 2 — MCP subprocess는 서버 수명 동안 딱 1개
     backend, fast_llm, quality_llm = _build_llms()
     app.state.llm_backend = backend
+    # 개선 3 — runbook 검색기도 싱글턴: 기동 시 1회 인덱싱(runbook 임베딩)해 모든 요청이 공유
+    # RUNBOOK_RETRIEVER=keyword 로 기동하면 기존 키워드 규칙(개선 전)으로 즉시 되돌아간다
+    retriever = None
+    if os.environ.get("RUNBOOK_RETRIEVER", "hybrid") != "keyword":
+        retriever = RunbookRetriever(make_embedder(backend))
+        await retriever.build()
     deps = SupervisorDeps(
         fast_llm=fast_llm,
         quality_llm=quality_llm,
         mcp=mcp,
         session_store=SqliteSessionStore(),
         version=os.environ.get("SUPERVISOR_VERSION", "v2"),
+        runbook_retriever=retriever,
     )
     app.state.deps = deps
     app.state.graph = build_graph(deps) if deps.version == "v2" else None
@@ -123,7 +131,9 @@ async def health():
             "supervisor_version": app.state.deps.version,
             "llm_backend": app.state.llm_backend,
             "fast_llm": app.state.deps.fast_llm.name,
-            "quality_llm": app.state.deps.quality_llm.name}
+            "quality_llm": app.state.deps.quality_llm.name,
+            "runbook_retriever": (app.state.deps.runbook_retriever.method
+                                  if app.state.deps.runbook_retriever else "keyword")}
 
 
 @app.get("/version")

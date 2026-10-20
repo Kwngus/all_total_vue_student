@@ -1,0 +1,20 @@
+[
+  {"id": 1,  "query": "payments-service 결제 응답이 느려지고 CPU가 치솟았어요, 원인 확인해주세요", "expected": ["cpu-spike"]},
+  {"id": 2,  "query": "cache-service 메모리 사용률이 계속 올라가고 있어요", "expected": ["memory-leak"]},
+  {"id": 3,  "query": "log-service 디스크 공간이 부족하다는 알림이 왔어요", "expected": ["disk-full"]},
+  {"id": 4,  "query": "gateway-service에서 payments-service로 가는 요청이 타임아웃 나고 있어요", "expected": ["network-timeout"]},
+  {"id": 5,  "query": "web-01 CPU 급증 원인 진단해줘", "expected": ["cpu-spike"]},
+  {"id": 6,  "query": "로그인 응답이 느려요, 원인 확인해주세요", "expected": ["high-latency"]},
+  {"id": 7,  "query": "DB 연결이 안 되고 서비스가 다운됐어요", "expected": ["db-down"]},
+  {"id": 8,  "query": "auth-service 메모리 누수가 의심돼요, 힙이 계속 증가해요", "expected": ["memory-leak"]},
+  {"id": 9,  "query": "web-01 디스크가 꽉 찼어요", "expected": ["disk-full"]},
+  {"id": 10, "query": "web-01에서 외부 API 호출이 자꾸 타임아웃 나요", "expected": ["network-timeout"]},
+  {"id": 11, "query": "payments-service에서 패킷 손실이 생기고 504 에러가 나요", "expected": ["network-timeout"]},
+  {"id": 12, "query": "cache-service 응답이 느려지고 커넥션 풀이 가득 찼어요", "expected": ["high-latency"]},
+  {"id": 13, "query": "gateway-service 상태 확인해줘", "expected": ["network-timeout"]},
+  {"id": 14, "query": "log-service 로그가 쌓여서 /var/log 용량이 95%예요", "expected": ["disk-full"]},
+  {"id": 15, "query": "auth-service CPU가 90% 넘게 계속 유지돼요", "expected": ["cpu-spike"]},
+  {"id": 16, "query": "데이터베이스 프라이머리가 응답하지 않아 failover가 필요해 보여요", "expected": ["db-down"]},
+  {"id": 17, "query": "payments-service CPU 급증, cache-service는 메모리가 계속 올라가요", "expected": ["cpu-spike", "memory-leak"]},
+  {"id": 18, "query": "log-service 디스크 부족이랑 gateway-service 타임아웃 같이 봐줘", "expected": ["disk-full", "network-timeout"]}
+]

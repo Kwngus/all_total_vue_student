@@ -131,7 +131,9 @@ const STEP_LABELS = {
   TaskCompleted: e => (e.source === 'monitoring'
       ? `모니터링 지표 확인 (시스템: ${e.target})`
       : `대응 매뉴얼(runbook) 조회 (장애유형: ${e.target})`) + (e.retries ? ' (재시도 성공)' : ''),
-  ReplanCheck: e => e.is_sufficient ? null : `정보 부족 → 장애유형 "${e.target}"로 추가 조사`,
+  ReplanCheck: e => e.is_sufficient ? null
+      : `정보 부족 → 장애유형 "${e.target}"로 추가 조사` + (e.method ? ` (선택 방식: ${
+          {hybrid: '의미+어휘 검색', lexical: '어휘 검색', keyword: '키워드 규칙'}[e.method] || e.method})` : ''),
   DraftWritten: e => `답변 초안 작성 (시도 ${e.attempt})`,
   Validation: e => e.verdict === '합격' ? '검수 통과' : '검수 반려 → 다시 작성',
   Finalize: () => '최종 답변 완성',
