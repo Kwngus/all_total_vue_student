@@ -85,6 +85,9 @@
         <span class="badge">runbook {{ config.runbook_retriever }}</span>
         <span class="badge" :class="config.llm_http_mode === 'async' ? 'on' : 'off'">HTTP {{ config.llm_http_mode }}</span>
         <span class="badge" :class="config.grounding_check ? 'on' : 'off'">근거 검증 {{ config.grounding_check ? 'ON' : 'OFF' }}</span>
+        <span class="badge" :class="config.llm_fallback ? (config.llm_fallback.circuit.state === 'closed' ? 'on' : 'off') : 'off'">
+          LLM 대체 {{ config.llm_fallback ? (CIRCUIT_LABELS[config.llm_fallback.circuit.state] + ' → ' + config.llm_fallback.backup_fast) : 'OFF' }}</span>
+        <span class="badge" :class="config.remediation ? 'on' : 'off'">조치 승인 {{ config.remediation ? 'ON' : 'OFF' }}</span>
       </div>
       <div class="spacer"></div>
       <select v-model.number="hours" @change="refresh">
@@ -117,6 +120,10 @@
           <div class="sub">민감정보가 LLM·DB로 가지 않음</div></div>
         <div class="kpi" :class="s.grounding_warnings ? 'warn' : ''"><div class="label">근거 경고 답변</div><div class="value">{{ s.grounding_warnings }}</div>
           <div class="sub">평균 검수 {{ s.avg_validation_attempts }}회</div></div>
+        <div class="kpi" :class="s.fallback_requests ? 'warn' : ''"><div class="label">보조 LLM 대체</div><div class="value">{{ s.fallback_requests }}</div>
+          <div class="sub">{{ entries(s.fallback_reasons).map(([k, n]) => (FALLBACK_LABELS[k] || k) + ' ' + n).join(' · ') || '주 LLM 정상' }}</div></div>
+        <div class="kpi"><div class="label">조치 승인</div><div class="value">{{ (s.approval_decisions.approved || 0) }} / {{ entries(s.approval_decisions).reduce((a, [, n]) => a + n, 0) }}</div>
+          <div class="sub">거부 {{ s.approval_decisions.rejected || 0 }} · 만료 {{ s.approval_decisions.expired || 0 }}</div></div>
       </section>
 
       <section class="grid">
@@ -179,6 +186,25 @@
         </div>
       </section>
 
+      <section class="card" v-if="approvals.length">
+        <h2>조치 승인 기록 (감사 로그)</h2>
+        <div class="hint">에이전트가 제안한 조치는 관리자 토큰 보유자가 승인해야만 실행된다 — 누가 언제 무엇을 결정했는지 남김</div>
+        <div class="scroll">
+          <table>
+            <thead><tr><th>시각</th><th>결정</th><th>승인자</th><th>조치</th><th>결과 (조치 후 상태)</th></tr></thead>
+            <tbody>
+              <tr v-for="a in approvals" :key="a.approval_id + a.ts">
+                <td style="white-space:nowrap">{{ a.ts.slice(5).replace('T', ' ') }}</td>
+                <td><span class="st" :class="a.decision === 'approved' ? 'ok' : 'rejected'">{{ DECISION_LABELS[a.decision] || a.decision }}</span></td>
+                <td>{{ a.approver }}</td>
+                <td>{{ a.actions.map(x => x.system_name + ' · ' + x.action).join(', ') }}</td>
+                <td>{{ a.results.map(r => r.system_name + ' ' + (r.ok ? (r.after || '?') : '실패')).join(', ') || '–' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="card">
         <h2>최근 요청 {{ requests.length }}건</h2>
         <div class="hint">질문은 가드레일을 통과한 마스킹본만 저장된다 — 관리자도 원문 민감정보를 볼 수 없음</div>
@@ -222,6 +248,11 @@ const REJECT_CODES = ['EMPTY_MESSAGE', 'MESSAGE_TOO_LONG', 'PROMPT_INJECTION'];
 const MASK_LABELS = { API_KEY: 'API 키', JWT: '토큰', BEARER: '토큰', PASSWORD: '비밀번호',
   RRN: '주민번호', CARD: '카드번호', EMAIL: '이메일', PHONE: '전화번호', IP: 'IP 주소' };
 const METHOD_LABELS = { hybrid: '의미+어휘 검색', lexical: '어휘 검색', keyword: '키워드 규칙' };
+const CIRCUIT_LABELS = { closed: '대기', open: '차단 중', half_open: '복구 시험' };
+const FALLBACK_LABELS = { CIRCUIT_OPEN: '차단 중 우회', TIMEOUT: '시간 초과', LLM_UNREACHABLE: '연결 불가',
+  LLM_RATE_LIMIT: '요청 한도', LLM_AUTH: '인증 오류', LLM_HTTP_500: '서버 오류', LLM_HTTP_502: '서버 오류',
+  LLM_HTTP_503: '서버 오류', LLM_HTTP_504: '서버 오류' };
+const DECISION_LABELS = { approved: '승인·실행', rejected: '거부', expired: '만료' };
 
 function readToken() { try { return sessionStorage.getItem('adminToken') || ''; } catch { return ''; } }
 function saveToken(t) { try { t ? sessionStorage.setItem('adminToken', t) : sessionStorage.removeItem('adminToken'); } catch {} }
@@ -233,7 +264,7 @@ createApp({
     const authed = ref(false);
     const error = ref('');
     const hours = ref(24);
-    const s = ref(null), config = ref(null), requests = ref([]);
+    const s = ref(null), config = ref(null), requests = ref([]), approvals = ref([]);
     const updatedAt = ref('');
     let timer = null;
 
@@ -249,6 +280,7 @@ createApp({
       try {
         const [m, q] = await Promise.all([api('metrics', { hours: hours.value }), api('requests', { limit: 50 })]);
         s.value = m.summary; config.value = m.config; requests.value = q.requests;
+        approvals.value = m.approvals || [];
         authed.value = true; error.value = '';
         updatedAt.value = new Date().toLocaleTimeString('ko-KR');
       } catch (e) {
@@ -268,9 +300,10 @@ createApp({
     onMounted(() => { if (token.value) refresh(); timer = setInterval(() => authed.value && refresh(), 5000); });
     onUnmounted(() => clearInterval(timer));
 
-    return { token, tokenInput, authed, error, hours, s, config, requests, updatedAt,
+    return { token, tokenInput, authed, error, hours, s, config, requests, approvals, updatedAt,
              refresh, login, logout, hourMax, entries, pct, sec,
-             CODE_LABELS, REJECT_CODES, MASK_LABELS, METHOD_LABELS };
+             CODE_LABELS, REJECT_CODES, MASK_LABELS, METHOD_LABELS,
+             CIRCUIT_LABELS, FALLBACK_LABELS, DECISION_LABELS };
   },
 }).mount('#app');
 </script>

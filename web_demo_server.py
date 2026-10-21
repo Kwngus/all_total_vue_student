@@ -56,6 +56,20 @@ async def proxy_admin(name: str, req: Request):
     return JSONResponse(r.json(), status_code=r.status_code)
 
 
+@app.post("/approvals/{approval_id}")
+async def proxy_approval(approval_id: str, req: Request):
+    """개선 8 — 조치 승인/거부 중계. 관리자 토큰 헤더를 그대로 전달한다 (검증은 백엔드가)."""
+    body = await req.body()
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            r = await client.post(f"{BACKEND}/approvals/{approval_id}", content=body,
+                                  headers={"content-type": "application/json",
+                                           "x-admin-token": req.headers.get("x-admin-token", "")})
+    except httpx.HTTPError:
+        return JSONResponse({"error": BACKEND_DOWN}, status_code=503)
+    return JSONResponse(r.json(), status_code=r.status_code)
+
+
 @app.get("/health")
 async def proxy_health():
     try:

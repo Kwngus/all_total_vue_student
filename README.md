@@ -3,7 +3,8 @@
 > SKALA AI Mini-Project · 과제 1번(Base AI Agent 개선) · 강주현
 >
 > 배포받은 `all_total_vue`(LangGraph + MCP + FastAPI + Vue 기반 운영 장애 진단 에이전트)를
-> **"실제로 서비스할 수 있는가"** 라는 기준으로 점검하고, 찾아낸 약점 6가지를 고쳤습니다.
+> **"실제로 서비스할 수 있는가"** 라는 기준으로 점검하고, 찾아낸 약점 6가지를 고친 뒤
+> 운영 기능 2가지(LLM 장애 자동 대체, 사람 승인 후 조치 실행)를 더했습니다.
 > 모든 개선은 **같은 입력으로 개선 전/후를 실측**했고, 개선 전 동작은 환경변수 하나로 재현할 수 있습니다.
 >
 > 원본 프로그램 설명서는 [doc/README.md](doc/README.md)에 그대로 있습니다.
@@ -20,8 +21,10 @@
 | 4 | 개선 | **LLM 호출 동기 → 비동기** | 동시 3건 **18.9s → 6.8s**, 처리 중 `/health` **1917ms → 3ms** | `LLM_HTTP_MODE=sync` |
 | 5 | 개선 | **답변 수치 근거 검증** — 수집 데이터에 없는 숫자 반려·재작성·경고 | 조작 재현 시 근거 없는 수치 **4/4 → 0/4**, 정상 답변 추가 비용 **0** | `GROUNDING_CHECK=off` |
 | 6 | 추가 | **관리자 대시보드** — 토큰 인증, 성공률·지연·비용·오류·마스킹 현황 | 운영 지표 확인 수단 **없음 → 실시간 화면** | – |
+| 7 | 추가 | **LLM 장애 자동 대체** — OpenAI 장애 시 Ollama로 전환 + 서킷 브레이커 | OpenAI 장애 중 성공 **0/6 → 6/6**, 평균 응답 5.4s(대체만) → **2.9s**(브레이커) | `LLM_FALLBACK=off` |
+| 8 | 추가 | **조치 실행 전 사람 승인 (HITL)** — 제안 → `interrupt()` 승인 대기 → MCP로 실행 → 재조회 | 조치는 글로만 안내 → **승인 시 실행·정상화 확인** (`degraded → healthy`), 승인 없이 실행 **0건** | `REMEDIATION=off` |
 
-단위 테스트 **58개** (`tests/`), 평가·벤치마크 스크립트 4종 (`eval/`, `bench/`)
+단위 테스트 **82개** (`tests/`), 평가·벤치마크 스크립트 5종 (`eval/`, `bench/`)
 
 ---
 
@@ -38,6 +41,8 @@
 | `async def` 노드 안에서 **동기 `httpx.post`** 호출 | 코드 확인 + 벤치마크 | LLM 응답을 기다리는 동안 서버 전체 정지 |
 | validate가 "30자 이상 + `1)` 포함"만 검사 | 코드 확인 (원본 주석에 "CPU 53.5% 조작" 실측 사례 기록) | 그럴듯한 거짓 숫자를 막지 못함 |
 | 관리자가 볼 수 있는 운영 화면 없음 (LangSmith 트레이스뿐) | – | 서비스 전체 상태 파악 불가 |
+| OpenAI 장애(5xx·429·네트워크) 시 모든 요청 실패 | 가짜 OpenAI에 503 주입 | **장애 대응 에이전트가 장애 상황에서 멈춤** |
+| 에이전트는 조치를 글로 안내하는 데서 끝남 — 운영자가 콘솔에서 직접 실행·재확인 | – | 대응 시간이 사람 손에 달림. 반대로 자동 실행은 LLM 오판이 곧 운영 사고 |
 
 ---
 
@@ -143,6 +148,51 @@ flowchart LR
 - 성공률에서 **정책 거절은 실패로 세지 않음** (인젝션 차단은 장애가 아니라 정상 방어)
 - 역할 분담: LangSmith = 요청 한 건의 내부 흐름(트레이스) / 대시보드 = 서비스 전체 운영 상태
 
+### 3-7. LLM 장애 자동 대체 — `agent/fallback_llm.py`
+
+- **대체**: 주 LLM(OpenAI) 호출이 일시적 장애(5xx·429·연결 실패·타임아웃·키 오류)로 실패하면 **같은 단계**(분류·계획·분석·대화·답변 작성)를 보조 LLM(로컬 Ollama)으로 다시 호출. 그래프 노드는 바뀌지 않음 — `SupervisorDeps`에 같은 인터페이스의 래퍼를 꽂기만 함
+- **서킷 브레이커**: 연속 3회 실패 → 30초간 주 LLM을 부르지 않고 바로 보조로 (죽은 서버를 매번 기다리지 않음) → 이후 1건만 시험 호출(half-open), 성공하면 복구. fast/quality가 **브레이커 하나를 공유** (같은 계정·네트워크)
+- **대체하지 않는 실패**: 400(요청 자체 오류)·코드 버그 — 보조로 다시 해도 소용없거나 버그를 가림 → 기존 오류 처리(error_id)로
+- **숨기지 않기**: 대체된 단계는 화면에 `⚡ openai:gpt-4o 응답 실패(서버 오류 503) → ollama:qwen3:8b로 대체`로 표시, 관리자 대시보드에 대체 건수·사유·브레이커 상태 표시
+- 보조까지 실패하면 **원래 원인(주 LLM 오류)** 으로 사용자 안내 — 문의번호·오류 코드가 그대로 유지됨
+
+**Before/After** (`bench/fallback_bench.py` — 가짜 OpenAI: 매 호출 1초 뒤 503, 가짜 Ollama: 0.5초 정상, 장애 질문 6건 순차, [결과](eval/fallback_results_20261021_0142.md))
+
+| 시나리오 | 성공 | 평균 응답 | 첫 요청 | 이후 요청 | 죽은 OpenAI 호출 수 |
+|---|---|---|---|---|---|
+| ① 개선 전 (`LLM_FALLBACK=off`) | **0/6** | – | 1.1s (실패) | 1.0s (실패) | 6 |
+| ② 대체만 (브레이커 없음) | 6/6 | 5.4s | 6.0s | 5.3s | 18 |
+| ③ 대체 + 서킷 브레이커 | **6/6** | **2.9s** | 6.0s | **2.3s** | **3** |
+
+- ②→③: 요청당 LLM 3번 × 1초씩 '죽은 서버 대기'가 사라짐. 실제 OpenAI가 응답 없이 멈추는 장애라면 대기 시간은 타임아웃만큼 길어지므로 차이가 더 커짐 → `OPENAI_TIMEOUT`(기본 120초)을 대체 사용 시 짧게 두는 것을 권장
+
+### 3-8. 조치 실행 전 사람 승인 (Human-in-the-loop) — `agent/remediation.py`, `mcp_server.py`
+
+```
+… write → validate → finalize ─▶ propose_action ─▶ approval (interrupt — 그래프 정지) ─▶ execute_action
+            답변은 여기서 바로 사용자에게        이상 시스템 × runbook   POST /approvals/{id}       MCP execute_remediation
+                                                유형 → 조치 (코드 규칙)  (관리자 토큰 필요)         → 모니터링 재조회
+```
+
+- **제안은 코드 규칙으로**: 이상(degraded/down) 시스템과 선택된 runbook 유형으로 조치를 고름 (`high-latency → scale_out`, `memory-leak → restart_service`, `disk-full → clear_old_logs` …). LLM이 조치를 고르지 않고, 실행 가능한 조치는 **허용 목록 4가지**뿐 — MCP 서버에서도 한 번 더 검사
+- **승인 대기**: LangGraph `interrupt()` + `InMemorySaver` 체크포인터로 그래프를 멈춤. 답변은 먼저 나가고, 화면에 승인 카드(대상·조치·현재 상태·근거 runbook)
+- **권한 분리**: 승인 API는 **관리자 토큰**이 있어야 호출 가능 — 질문할 수 있는 사람 ≠ 조치를 승인할 수 있는 사람
+- **실행 후 확인**: 승인되면 MCP Tool `execute_remediation`로 실행 → 같은 시스템을 다시 조회해 `상태 degraded → healthy, CPU 78% → 49%`처럼 전/후를 보고. 결과 문장은 대화 이력에도 남음
+- **안전장치**: 거부·만료(10분)면 실행 0건, 같은 승인 두 번 → 409, 없는 번호 → 404, 승인 번호는 추측 불가(uuid4), 모든 결정은 **감사 로그**(누가·언제·무엇·결과)로 DB에 남고 대시보드에 표시
+- **시뮬레이션**: 실제 서버를 건드리지 않고 `data/remediation_state.json`에 기록, 이후 10분간 모니터링이 해당 시스템을 정상으로 보고. 실제 운영이라면 이 함수 안이 쿠버네티스·클라우드 API 호출 자리
+
+**검증** (`tests/test_remediation.py` — 실제 그래프를 가짜 LLM·가짜 MCP로, 8개)
+
+| 경우 | 결과 |
+|---|---|
+| 장애 질문 | 답변 즉시 반환 + 승인 대기, **실행 0건** |
+| 승인 | `scale_out` 실행 → 재조회 `degraded → healthy`, 보고문에 승인자 표시 |
+| 거부 / 만료 | 실행 0건, "실행하지 않았습니다 (거부/만료)" |
+| 이상 시스템 없음 | 승인 대기 없이 종료 |
+| `REMEDIATION=off` / 체크포인터 없음 | 기존 그래프와 동일 |
+
+실서버 HTTP 확인: 토큰 없음·틀린 토큰 → 401, 승인 → 실행·재조회, 중복 승인 → 409, 없는 번호 → 404
+
 ---
 
 ## 4. 최종 검증 — 실제 OpenAI API (`sh/verify_openai.sh`)
@@ -170,13 +220,14 @@ gpt-4o-mini(분류·계획) + gpt-4o(답변 작성) + text-embedding-3-small, 20
 | 기술 요소 | 이 프로젝트에서 |
 |---|---|
 | RAG | runbook 하이브리드 검색 (임베딩 + 어휘), 가중치 sweep 실측 |
-| MCP | 원본의 ops/docs MCP 서버를 그대로 사용 (monitoring Tool, runbook Resource, 진단 Prompt) |
-| Multi-Agent / LangGraph | 원본 supervisor 그래프 유지, validate·finalize·replan_check 노드 확장 |
+| MCP | 원본 ops/docs MCP 서버 + **조치 실행 Tool `execute_remediation` 추가** (허용 목록·승인 번호 검사) |
+| Multi-Agent / LangGraph | 원본 supervisor 그래프 유지, validate·finalize·replan_check 확장, **`interrupt()` + 체크포인터로 사람 승인 단계** |
+| 장애 대응 설계 | LLM 대체 + 서킷 브레이커(closed → open → half-open), fast/quality 브레이커 공유 |
 | 의존성 주입 | `SupervisorDeps.runbook_retriever`, 가짜 임베더·가짜 LLM으로 테스트 교체 |
 | LangSmith | `select_runbooks` 등 신규 단계 `@traceable`, 마스킹본만 기록 |
-| 모듈화 | 기능별 신규 모듈 6개 (`guardrails`, `errors`, `runbook_retriever`, `llm_http`, `grounding`, `metrics_store`) |
-| 단위 테스트 | 58개 — 한글 조사 경계·거짓 양성 같은 **실제로 겪은 버그의 회귀 테스트** 포함 |
-| 재현 가능한 비교 | 개선 전 동작을 환경변수로 복원 (`RUNBOOK_RETRIEVER`, `LLM_HTTP_MODE`, `GROUNDING_CHECK`) |
+| 모듈화 | 기능별 신규 모듈 8개 (`guardrails`, `errors`, `runbook_retriever`, `llm_http`, `grounding`, `metrics_store`, `fallback_llm`, `remediation`) |
+| 단위 테스트 | 82개 — 한글 조사 경계·거짓 양성 같은 **실제로 겪은 버그의 회귀 테스트**, 브레이커 상태 전이, 승인 없이 실행되지 않음 포함 |
+| 재현 가능한 비교 | 개선 전 동작을 환경변수로 복원 (`RUNBOOK_RETRIEVER`, `LLM_HTTP_MODE`, `GROUNDING_CHECK`, `LLM_FALLBACK`, `REMEDIATION`) |
 
 ---
 
@@ -191,12 +242,15 @@ gpt-4o-mini(분류·계획) + gpt-4o(답변 작성) + text-embedding-3-small, 20
 | 하이브리드 RAG | 요청마다 **임베딩 호출 2~4회 추가**(지연·OpenAI 사용 시 비용). runbook을 메모리에 들고 있어 문서가 수천 개면 벡터 DB 필요. **가중치를 같은 18문항으로 튜닝 → 과적합 가능성** (단, OpenAI 임베딩에서도 동일하게 94%). 증상 없이 "상태 확인해줘"처럼 묻는 질문은 1순위가 흔들림(정답은 2순위로 포함). 임베딩이 꺼진 어휘 검색 모드는 영어 알림 시스템에 약함 |
 | 비동기화 | 서버는 더 이상 막히지 않지만 **Ollama는 모델이 요청을 순차 처리**해 실제 총 시간 이득은 작음. MCP 클라이언트의 lock은 여전히 MCP 호출을 직렬화 |
 | 근거 검증 | **숫자만** 검사(문장 형태의 거짓은 못 잡음). 수집값으로 계산한 파생 수치(2.4s−1.0s=1.4s)도 반려됨. 실모델에서 효과를 수치로 입증하지 못함 |
-| 대시보드 | 단일 공유 토큰(사용자별 권한·감사 로그 없음). 지표가 `session.db`와 같은 파일에 **보존 기한 없이 누적**되고 집계를 Python에서 매번 계산 → 데이터가 커지면 느려짐. 비용은 가상 단가 |
+| 대시보드 | 단일 공유 토큰(사용자별 권한 없음 — 조치 승인 감사 로그의 승인자 이름도 자기 신고). 지표가 `session.db`와 같은 파일에 **보존 기한 없이 누적**되고 집계를 Python에서 매번 계산 → 데이터가 커지면 느려짐. 비용은 가상 단가 |
+
+| LLM 자동 대체 | 보조 모델(qwen3)은 품질이 낮아 **대체된 답변의 품질이 떨어질 수 있음** — 숨기지 않고 표시하는 것으로 대응. 로컬 Ollama가 떠 있어야 함. 브레이커 상태가 프로세스 메모리라 서버 여러 대면 각자 판단. 스트리밍 중간에 끊기면 보조 모델이 처음부터 다시 쓴다(앞부분 토큰이 화면에 남을 수 있어 최종본으로 덮어씀). 실측은 가짜 서버 장애 주입 — 실제 OpenAI 장애는 재현 불가 |
+| 사람 승인 | 승인 대기 상태가 **메모리 체크포인터**라 서버 재시작 시 대기 중 승인이 사라짐(→ SQLite/Postgres 체크포인터). 조치는 시뮬레이션. 조치 선택이 runbook 유형 1:1 규칙이라 단순함. 롤백(조치 되돌리기) 없음 |
 
 ## 7. 추가 개선 방향
 
-- **LLM 장애 시 자동 대체**: OpenAI 실패가 이어지면 Ollama로 전환하는 서킷 브레이커 (가짜 LLM 서버로 실패 주입 실측 가능)
-- **조치 실행 + 사람 승인(HITL)**: 재시작·롤백을 MCP Tool로 만들고 LangGraph `interrupt()`로 승인 후 실행, 실행 후 모니터링 재조회
+- **승인 상태 영구 저장**: SQLite 체크포인터로 서버 재시작에도 승인 대기 유지, 조치 롤백 Tool, 승인자 개인 계정
+- **대체 품질 관리**: 보조 모델 답변에 근거 검증 기준 강화, 주 LLM 복구 시 자동 재작성 옵션
 - **평가 데이터 분리**: 튜닝용/검증용 문항을 나눠 과적합 없이 재측정, LLM-as-judge로 답변 품질 채점
 - **운영 강화**: 지표 보존 기한·별도 DB, 관리자 계정·권한, GitHub Actions로 테스트 자동화
 
@@ -217,10 +271,11 @@ bash sh/run_frontend.sh         # http://localhost:8600 채팅, http://localhost
 
 | 명령 | 내용 |
 |---|---|
-| `python -m pytest tests -q` | 단위 테스트 58개 |
+| `python -m pytest tests -q` | 단위 테스트 82개 |
 | `python eval/runbook_eval.py [--sweep]` | runbook 정확도 keyword/어휘/하이브리드 비교, 의미 비중 탐색 |
 | `bash sh/run_bench.sh` | 동기 vs 비동기 동시성 벤치마크 (가짜 LLM, 과금 없음) |
 | `python eval/grounding_eval.py [--limit N]` | 수치 근거 검증 off/on 비교 |
+| `python bench/fallback_bench.py` | LLM 장애 자동 대체 Before/After (가짜 OpenAI 장애 주입, 과금 없음) |
 | `bash sh/verify_openai.sh` | **OpenAI 최종 검증** — 테스트·정확도·대표 시나리오·관리자 지표·근거 검증 일괄 실행 (과금) |
 
 **개선 전 동작 재현용 환경변수**
@@ -232,6 +287,11 @@ bash sh/run_frontend.sh         # http://localhost:8600 채팅, http://localhost
 | `GROUNDING_CHECK` | `off` | 형식만 검사 |
 | `RUNBOOK_SEMANTIC_WEIGHT` | `0.0~1.0` | 의미 점수 비중 (기본 0.4) |
 | `EMBED_BACKEND` | `ollama`/`openai`/`none` | 임베딩 제공자 (기본: LLM 백엔드를 따름) |
+| `LLM_FALLBACK` | `ollama`/`off` | OpenAI 장애 시 Ollama 대체 (기본 `ollama`, `LLM_BACKEND=openai`일 때만) |
+| `LLM_CB_THRESHOLD` / `LLM_CB_COOLDOWN` | `3` / `30` | 브레이커가 열리는 연속 실패 수 / 차단 시간(초) |
+| `OPENAI_TIMEOUT` | `120` | OpenAI 호출 타임아웃(초) — 대체 사용 시 짧게 권장 |
+| `REMEDIATION` | `on`/`off` | 조치 제안·승인 단계 |
+| `APPROVAL_TTL` / `REMEDIATION_TTL` | `600` / `600` | 승인 만료(초) / 시뮬레이션 조치 효과 유지(초) |
 
 ## 9. 추가·변경 파일
 
@@ -243,11 +303,15 @@ agent/llm_http.py          공용 비동기 HTTP 클라이언트                
 agent/grounding.py         답변 수치 근거 검증                           (신규)
 agent/metrics_store.py     요청 단위 운영 지표 저장소                     (신규)
 admin.html                 관리자 대시보드 화면                          (신규)
-agent/graph.py             runbook 선택·validate·finalize 확장, LLM await (수정)
+agent/fallback_llm.py      LLM 장애 자동 대체 + 서킷 브레이커             (신규)
+agent/remediation.py       조치 제안 규칙·결과 보고                       (신규)
+mcp_server.py              조치 실행 Tool(허용 목록·시뮬레이션)            (수정)
+agent/graph.py             runbook 선택·validate·finalize 확장, LLM await, 조치 제안·승인·실행 노드 (수정)
 agent/{ollama,openai,fake}_llm.py  비동기화, OPENAI_BASE_URL            (수정)
-server.py                  가드레일·오류 처리·지표 기록·관리자 API        (수정)
-web_chat.html              오류 말풍선, 마스킹·검수·검색 방식 표시        (수정)
+server.py                  가드레일·오류 처리·지표 기록·관리자 API, LLM 대체 조립, 승인 API (수정)
+web_chat.html              오류 말풍선, 마스킹·검수·검색 방식, 대체 알림, 승인 카드 (수정)
 web_demo_server.py         백엔드 다운 안내, 관리자 페이지·API 중계       (수정)
-tests/                     단위 테스트 58개                              (신규)
+tests/                     단위 테스트 82개                              (신규)
 eval/, bench/, sh/run_bench.sh, sh/verify_openai.sh  평가·벤치마크       (신규)
+bench/fallback_bench.py    LLM 대체 벤치마크, mock 서버에 장애 주입·Ollama 호환 추가 (신규·수정)
 ```

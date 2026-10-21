@@ -100,7 +100,9 @@ class OpenAILLM:
             payload["response_format"] = {"type": "json_object"}
         headers = {"Authorization": f"Bearer {self.api_key}",
                    "Content-Type": "application/json"}
-        resp = await llm_http.post_json(OPENAI_URL, payload, headers=headers, timeout=120.0)
+        # 개선 7 — 대체(fallback)를 쓸 때는 짧게 잡아야 '느리게 죽는' OpenAI를 오래 기다리지 않는다
+        timeout = float(os.environ.get("OPENAI_TIMEOUT", "120"))
+        resp = await llm_http.post_json(OPENAI_URL, payload, headers=headers, timeout=timeout)
         resp.raise_for_status()
         data = resp.json()
         content = data["choices"][0]["message"]["content"]

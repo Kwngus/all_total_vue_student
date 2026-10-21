@@ -4,6 +4,7 @@ route → (chat 직행 | incident 파이프라인)
 incident: plan(MCP Prompt 절차 반영) → gate(권위 게이트) → research(가드+병렬+재시도)
           → replan_check(부족 시 gap task 후 재조사) → analysis(needs_analysis=True일 때만
           실제 실행) → write → validate(반려 시 재작성) → finalize
+          → (개선 8) propose_action → approval(interrupt, 사람 승인 대기) → execute_action
 
 모든 노드는 SupervisorDeps를 functools.partial로 주입받는 순수 함수다(Wave 13).
 각 노드는 @traceable로 LangSmith에 계층 트리로 기록된다.
@@ -17,9 +18,10 @@ from typing import Any, TypedDict
 
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, StateGraph
+from langgraph.types import interrupt
 from langsmith import traceable
 
-from . import grounding
+from . import grounding, remediation
 from .deps import SupervisorDeps
 from .retry import with_retry
 
@@ -68,6 +70,11 @@ class AgentState(TypedDict, total=False):
     ungrounded: list[str]   # 개선 5 — 수집 데이터로 확인되지 않은 답변 속 수치
     cost_usd: float
     events: list[dict]
+    actions: list[dict]       # 개선 8 — 승인 대기 중인 조치 제안
+    approval_id: str
+    decision: dict            # 사람의 결정 {approved, approver, expired}
+    action_results: list[dict]
+    action_report: str
 
 
 def _cost(state: AgentState, usage: dict) -> float:
@@ -330,6 +337,63 @@ async def finalize_node(state: AgentState, deps: SupervisorDeps) -> dict:
             "events": state["events"] + [{"type": "Finalize", "pipeline": "incident-v2"}]}
 
 
+@traceable(name="propose_action_node")
+async def propose_action_node(state: AgentState, deps: SupervisorDeps) -> dict:
+    """개선 8 — 이상 시스템 + runbook 유형으로 조치를 코드 규칙으로 제안 (LLM이 고르지 않음)."""
+    if not remediation.enabled():
+        return {"actions": []}
+    actions = remediation.propose(state.get("collected", []), state["events"])
+    if not actions:
+        return {"actions": [], "events": state["events"] +
+                [{"type": "ActionSkipped", "reason": "조치할 이상 시스템 없음"}]}
+    approval_id = remediation.new_approval_id()
+    return {"actions": actions, "approval_id": approval_id,
+            "events": state["events"] + [{"type": "ActionProposed", "approval_id": approval_id,
+                                          "actions": actions}]}
+
+
+@traceable(name="approval_node")
+async def approval_node(state: AgentState, deps: SupervisorDeps) -> dict:
+    """개선 8 — 여기서 그래프가 멈춘다. 사람이 /approvals/{id}로 결정을 보내면
+    Command(resume=결정)으로 이 노드가 다시 실행되고, interrupt()가 그 결정을 돌려준다."""
+    decision = interrupt({"type": "ApprovalRequired", "approval_id": state["approval_id"],
+                          "actions": state["actions"],
+                          "expires_in_s": remediation.APPROVAL_TTL_S})
+    return {"decision": decision}
+
+
+@traceable(name="execute_action_node")
+async def execute_action_node(state: AgentState, deps: SupervisorDeps) -> dict:
+    """개선 8 — 승인된 경우에만 실행하고, 같은 시스템을 다시 조회해 조치 전/후를 남긴다."""
+    decision = state.get("decision") or {}
+    events = list(state["events"])
+    results = []
+    if decision.get("approved"):
+        for a in state["actions"]:
+            r = await deps.mcp.call_tool("execute_remediation", {
+                "system_name": a["system_name"], "action": a["action"],
+                "approval_id": state["approval_id"]})
+            after = None
+            if r.get("ok"):
+                after = await deps.mcp.call_tool("get_monitoring_status",
+                                                 {"system_name": a["system_name"]})
+            results.append({**a, "ok": bool(r.get("ok")), "message": r.get("message", ""),
+                            "after": after})
+            events.append({"type": "ActionExecuted", "system_name": a["system_name"],
+                           "action": a["action"], "ok": bool(r.get("ok")),
+                           "before_status": a["before"]["status"],
+                           "after_status": after["status"] if after else None})
+    else:
+        events.append({"type": "ActionRejected", "approval_id": state["approval_id"],
+                       "expired": bool(decision.get("expired"))})
+    return {"action_results": results, "action_report": remediation.report(results, decision),
+            "events": events}
+
+
+def _after_propose(state: AgentState) -> str:
+    return "approval" if state.get("actions") else END
+
+
 def _after_route(state: AgentState) -> str:
     return "chat_answer" if state["route"] == "chat" else "plan"
 
@@ -343,7 +407,9 @@ def _after_validate(state: AgentState) -> str:
     return "finalize" if state.get("validation_feedback") is None else "write"
 
 
-def build_graph(deps: SupervisorDeps):
+def build_graph(deps: SupervisorDeps, checkpointer=None):
+    """checkpointer — 개선 8의 승인 대기(interrupt) 동안 실행 상태를 보관한다.
+    없으면(테스트·v1 호환) 조치 제안 단계까지만 가고 승인 대기 노드는 붙이지 않는다."""
     g = StateGraph(AgentState)
     node = lambda fn: partial(fn, deps=deps)   # Wave 13 — 명시적 의존성 주입
     g.add_node("route", node(route_node))
@@ -356,6 +422,11 @@ def build_graph(deps: SupervisorDeps):
     g.add_node("write", node(write_node))
     g.add_node("validate", node(validate_node))
     g.add_node("finalize", node(finalize_node))
+    hitl = checkpointer is not None
+    if hitl:
+        g.add_node("propose_action", node(propose_action_node))
+        g.add_node("approval", node(approval_node))
+        g.add_node("execute_action", node(execute_action_node))
 
     g.set_entry_point("route")
     g.add_conditional_edges("route", _after_route,
@@ -370,5 +441,12 @@ def build_graph(deps: SupervisorDeps):
     g.add_edge("write", "validate")
     g.add_conditional_edges("validate", _after_validate,
                             {"finalize": "finalize", "write": "write"})
-    g.add_edge("finalize", END)
-    return g.compile()
+    if hitl:
+        g.add_edge("finalize", "propose_action")
+        g.add_conditional_edges("propose_action", _after_propose,
+                                {"approval": "approval", END: END})
+        g.add_edge("approval", "execute_action")
+        g.add_edge("execute_action", END)
+    else:
+        g.add_edge("finalize", END)
+    return g.compile(checkpointer=checkpointer)

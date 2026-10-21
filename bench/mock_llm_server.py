@@ -7,6 +7,10 @@
     python bench/mock_llm_server.py                  # http://127.0.0.1:8700/v1
 그 다음 에이전트를 이 서버로 연결:
     LLM_BACKEND=openai OPENAI_API_KEY=mock OPENAI_BASE_URL=http://127.0.0.1:8700/v1 python server.py
+
+개선 7(LLM 장애 자동 대체) 실험용 옵션
+    MOCK_FAIL=503      모든 OpenAI 호출을 MOCK_LATENCY초 기다린 뒤 503으로 실패 ('느리게 죽는' 장애)
+    MOCK_PORT=8701     다른 포트로 하나 더 띄워 Ollama 대역으로 쓴다 (/api/chat, Ollama 응답 형식)
 """
 import asyncio
 import hashlib
@@ -15,11 +19,15 @@ import os
 
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 LATENCY = float(os.environ.get("MOCK_LATENCY", "2.0"))
 # MOCK_HALLUCINATE=1 이면 첫 보고서 초안에 수집되지 않은 수치(CPU 53.5%, 응답 3.7s)를 섞는다.
 # 검증 반려 사유가 프롬프트에 들어오면 수집값만 쓴 답변으로 고쳐 쓴다 — 개선 5 동작 확인용.
 HALLUCINATE = os.environ.get("MOCK_HALLUCINATE") == "1"
+FAIL = os.environ.get("MOCK_FAIL")          # 예: "503" — 개선 7 실험용 장애 주입
+PORT = int(os.environ.get("MOCK_PORT", "8700"))
+CALLS = {"openai": 0, "ollama": 0}
 app = FastAPI()
 
 
@@ -47,7 +55,10 @@ async def chat_completions(req: Request):
     body = await req.json()
     system = next((m["content"] for m in body["messages"] if m["role"] == "system"), "")
     user = next((m["content"] for m in body["messages"] if m["role"] == "user"), "")
+    CALLS["openai"] += 1
     await asyncio.sleep(LATENCY)   # 비동기 대기 — 가짜 서버 자신은 동시 요청을 병렬 처리
+    if FAIL:
+        return JSONResponse({"error": {"message": "mock outage"}}, status_code=int(FAIL))
     return {"choices": [{"message": {"role": "assistant", "content": _reply_for(system, user)}}],
             "usage": {"total_tokens": 200}}
 
@@ -63,6 +74,31 @@ async def embeddings(req: Request):
     return {"data": [{"embedding": vec(t)} for t in texts]}
 
 
+@app.post("/api/chat")
+async def ollama_chat(req: Request):
+    """Ollama 호환 (/api/chat) — stream=true면 NDJSON 두 줄(내용, done)로 응답."""
+    body = await req.json()
+    system = next((m["content"] for m in body["messages"] if m["role"] == "system"), "")
+    user = next((m["content"] for m in body["messages"] if m["role"] == "user"), "")
+    CALLS["ollama"] += 1
+    await asyncio.sleep(LATENCY)
+    text = _reply_for(system, user)
+    if body.get("stream"):
+        async def gen():
+            yield json.dumps({"message": {"content": text}, "done": False}) + "\n"
+            yield json.dumps({"message": {"content": ""}, "done": True,
+                              "prompt_eval_count": 150, "eval_count": 50}) + "\n"
+        return StreamingResponse(gen(), media_type="application/x-ndjson")
+    return {"message": {"role": "assistant", "content": text}, "done": True,
+            "prompt_eval_count": 150, "eval_count": 50}
+
+
+@app.get("/calls")
+async def calls():
+    """벤치마크가 '주 LLM을 몇 번 불렀나'를 확인하는 용도."""
+    return CALLS
+
+
 if __name__ == "__main__":
-    print(f"mock LLM: http://127.0.0.1:8700/v1 (응답 지연 {LATENCY}s)")
-    uvicorn.run(app, host="127.0.0.1", port=8700, log_level="warning")
+    print(f"mock LLM: http://127.0.0.1:{PORT} (응답 지연 {LATENCY}s, 장애 주입 {FAIL or '없음'})")
+    uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning")

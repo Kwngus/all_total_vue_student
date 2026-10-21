@@ -77,6 +77,26 @@
     color: white; font-size: 14px; cursor: pointer;
   }
   button:disabled { background: #3a3a52; cursor: default; }
+  /* 개선 7 — 보조 LLM으로 대체된 단계 */
+  .steps .step.warn::before { content: "⚡ "; }
+  .steps .step.warn { color: #f2c46d; }
+  /* 개선 8 — 조치 승인 카드 */
+  .approval {
+    flex-shrink: 0; max-width: 70%; background: #2a2433; border: 1px solid #b08bd8;
+    border-radius: 12px; padding: 12px 14px; font-size: 13px; line-height: 1.5;
+  }
+  .approval h4 { margin: 0 0 8px; font-size: 14px; color: #d8c2f2; }
+  .approval .act { padding: 6px 0; border-top: 1px dashed #4a3f5c; }
+  .approval .act:first-of-type { border-top: none; }
+  .approval .act b { color: #fff; }
+  .approval .act small { display: block; color: #a99abf; }
+  .approval .controls { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .approval .controls input { flex: 1; min-width: 140px; padding: 7px 10px; font-size: 13px; }
+  .approval .controls button { padding: 7px 14px; font-size: 13px; }
+  .approval .controls button.reject { background: #4a3f5c; }
+  .approval .note { margin-top: 8px; font-size: 12px; color: #a99abf; }
+  .approval .result { margin-top: 10px; white-space: pre-wrap; color: #c9f2d0; }
+  .approval .result.bad { color: #ffd7da; }
 </style>
 </head>
 <body>
@@ -89,7 +109,25 @@
       </div>
 
       <div v-else-if="item.kind === 'steps'" class="steps">
-        <div v-for="(step, i) in item.steps" :key="i" class="step">{{ step }}</div>
+        <div v-for="(step, i) in item.steps" :key="i" class="step" :class="{ warn: step.warn }">{{ step.text || step }}</div>
+      </div>
+
+      <div v-else-if="item.kind === 'approval'" class="approval">
+        <h4>🛠 조치 승인 요청 — 승인해야만 실행됩니다</h4>
+        <div v-for="(a, i) in item.actions" :key="i" class="act">
+          <b>{{ a.system_name }}</b> · {{ a.label }}
+          <small>현재 {{ a.before.status }} · CPU {{ a.before.cpu }}% · 메모리 {{ a.before.memory }}%
+            <template v-if="a.before.alerts.length"> · {{ a.before.alerts.join(', ') }}</template>
+            (근거 runbook: {{ a.incident_type }})</small>
+        </div>
+        <div v-if="item.status === 'pending' || item.status === 'sending'" class="controls">
+          <input v-model="item.token" type="password" placeholder="관리자 토큰" autocomplete="off" />
+          <button :disabled="item.status === 'sending' || !item.token" @click="decide(item, true)">승인·실행</button>
+          <button class="reject" :disabled="item.status === 'sending' || !item.token" @click="decide(item, false)">거부</button>
+        </div>
+        <div v-if="item.error" class="result bad">⚠️ {{ item.error }}</div>
+        <div v-if="item.report" class="result" :class="{ bad: item.status !== 'approved' }">{{ item.report }}</div>
+        <div v-if="item.status === 'pending'" class="note">승인 권한은 관리자 토큰 보유자에게만 있습니다 · {{ Math.round(item.expires / 60) }}분이 지나면 만료되어 승인해도 실행되지 않습니다</div>
       </div>
 
       <div v-else-if="item.kind === 'agent'" class="row agent">
@@ -139,7 +177,13 @@ const STEP_LABELS = {
       ? (e.ungrounded?.length ? `검수 종료 (근거 없는 수치 ${e.ungrounded.length}개 남음 → 경고 표시)` : '검수 통과')
       : (e.ungrounded?.length ? `검수 반려: 근거 없는 수치 ${e.ungrounded.join(', ')} → 다시 작성` : '검수 반려 → 다시 작성'),
   Finalize: () => '최종 답변 완성',
+  // 개선 7 — 주 LLM 장애로 보조 LLM이 대신 처리한 단계 (숨기지 않고 표시)
+  LLMFallback: e => ({ warn: true, text: `${e.from} 응답 실패(${FALLBACK_REASON[e.reason] || (e.reason.startsWith('LLM_HTTP_') ? '서버 오류 ' + e.reason.slice(9) : e.reason)}) → ${e.to}로 대체 (${STEP_NAME[e.step] || e.step})` }),
+  ActionProposed: e => `조치 제안 ${e.actions.length}건 → 승인 대기`,
 };
+const FALLBACK_REASON = { CIRCUIT_OPEN: '차단 중', TIMEOUT: '시간 초과', LLM_UNREACHABLE: '연결 불가',
+  LLM_RATE_LIMIT: '요청 한도', LLM_AUTH: '인증 오류' };
+const STEP_NAME = { route: '질문 분류', plan: '계획', analyze: '분석', chat: '대화', write: '답변 작성' };
 
 createApp({
   setup() {
@@ -194,6 +238,14 @@ createApp({
           return;
         }
 
+        if (e.type === 'ApprovalRequired') {   // 개선 8 — 답변 뒤에 승인 카드
+          log.value.push(reactive({ id: nextId++, kind: 'approval', approvalId: e.approval_id,
+            actions: e.actions, expires: e.expires_in_s, status: 'pending', token: adminToken,
+            report: '', error: '' }));
+          scrollToBottom();
+          return;
+        }
+
         if (e.type === 'Error') {
           log.value.push({ id: nextId++, kind: 'error', text: e.message, errorId: e.error_id });
           streamItem = null;
@@ -233,7 +285,27 @@ createApp({
       };
     }
 
-    return { backendLabel, log, input, sending, logEl, onSubmit };
+    // 개선 8 — 승인/거부. 토큰은 이 탭 메모리에만 두고(저장하지 않음) 다음 카드에 미리 채운다
+    let adminToken = '';
+    async function decide(item, approve) {
+      item.status = 'sending'; item.error = '';
+      adminToken = item.token;
+      try {
+        const r = await fetch(`/approvals/${item.approvalId}`, {
+          method: 'POST', headers: { 'content-type': 'application/json', 'x-admin-token': item.token },
+          body: JSON.stringify({ approve, approver: '운영자' }) });
+        const d = await r.json();
+        if (d.error) {
+          item.error = d.error.message;
+          item.status = (r.status === 401 || r.status === 503) ? 'pending' : 'done';
+        } else { item.report = d.report; item.status = d.status; }
+      } catch {
+        item.error = '서버와 연결할 수 없습니다.'; item.status = 'pending';
+      }
+      scrollToBottom();
+    }
+
+    return { backendLabel, log, input, sending, logEl, onSubmit, decide };
   },
 }).mount('#app');
 </script>

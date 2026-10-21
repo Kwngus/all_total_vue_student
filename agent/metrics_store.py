@@ -33,6 +33,15 @@ class MetricsStore:
                 route TEXT, latency_ms REAL, cost_usd REAL, backend TEXT,
                 masked TEXT, runbooks TEXT, runbook_method TEXT,
                 validation_attempts INTEGER, ungrounded INTEGER, run_id TEXT)""")
+        # 개선 7 — 기존 DB에도 열을 추가 (이미 있으면 무시)
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(requests)")}
+        if "fallbacks" not in cols:
+            self.conn.execute("ALTER TABLE requests ADD COLUMN fallbacks TEXT")
+        # 개선 8 — 조치 승인 감사 기록: 누가, 언제, 무엇을 승인/거부했고 결과가 어땠는지
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS approvals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, approval_id TEXT,
+                thread_id TEXT, actions TEXT, decision TEXT, approver TEXT, results TEXT)""")
         self.conn.commit()
 
     def record(self, *, channel: str, thread_id: str, query: str, status: str,
@@ -41,18 +50,19 @@ class MetricsStore:
                cost_usd: float = 0.0, masked: list[str] | None = None,
                runbooks: list[str] | None = None, runbook_method: str | None = None,
                validation_attempts: int = 0, ungrounded: int = 0,
-               run_id: str | None = None) -> None:
+               run_id: str | None = None, fallbacks: list[str] | None = None) -> None:
         try:
             with self._lock:
                 self.conn.execute(
                     "INSERT INTO requests (ts, channel, thread_id, query, status, code, error_id,"
                     " route, latency_ms, cost_usd, backend, masked, runbooks, runbook_method,"
-                    " validation_attempts, ungrounded, run_id)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " validation_attempts, ungrounded, run_id, fallbacks)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (datetime.now().isoformat(timespec="seconds"), channel, thread_id,
                      (query or "")[:200], status, code, error_id, route, round(latency_ms, 1),
                      cost_usd, backend, json.dumps(masked or []), json.dumps(runbooks or []),
-                     runbook_method, validation_attempts, ungrounded, run_id))
+                     runbook_method, validation_attempts, ungrounded, run_id,
+                     json.dumps(fallbacks or [])))
                 self.conn.commit()
         except Exception as exc:   # 지표 기록 실패가 서비스 응답을 막지 않게
             logger.warning("metrics record 실패: %s", exc)
@@ -66,6 +76,34 @@ class MetricsStore:
         for r in rows:
             r["masked"] = json.loads(r["masked"] or "[]")
             r["runbooks"] = json.loads(r["runbooks"] or "[]")
+            r["fallbacks"] = json.loads(r.get("fallbacks") or "[]")
+        return rows
+
+    def record_approval(self, *, approval_id: str, thread_id: str, actions: list[dict],
+                        decision: str, approver: str, results: list[dict]) -> None:
+        try:
+            with self._lock:
+                self.conn.execute(
+                    "INSERT INTO approvals (ts, approval_id, thread_id, actions, decision, approver,"
+                    " results) VALUES (?,?,?,?,?,?,?)",
+                    (datetime.now().isoformat(timespec="seconds"), approval_id, thread_id,
+                     json.dumps([{"system_name": a["system_name"], "action": a["action"]}
+                                 for a in actions], ensure_ascii=False),
+                     decision, approver[:40], json.dumps(results, ensure_ascii=False)))
+                self.conn.commit()
+        except Exception as exc:
+            logger.warning("approval record 실패: %s", exc)
+
+    def approvals(self, since: datetime, limit: int = 20) -> list[dict]:
+        with self._lock:
+            cur = self.conn.execute(
+                "SELECT ts, approval_id, actions, decision, approver, results FROM approvals"
+                " WHERE ts >= ? ORDER BY id DESC LIMIT ?", (since.isoformat(), limit))
+            cols = [c[0] for c in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        for r in rows:
+            r["actions"] = json.loads(r["actions"] or "[]")
+            r["results"] = json.loads(r["results"] or "[]")
         return rows
 
     def recent(self, limit: int = 50) -> list[dict]:
@@ -110,6 +148,11 @@ class MetricsStore:
             "avg_validation_attempts": round(sum(r["validation_attempts"] or 0 for r in incident)
                                              / len(incident), 2) if incident else 0.0,
             "grounding_warnings": sum(1 for r in incident if r["ungrounded"]),
+            # 개선 7 — 보조 LLM으로 대체되어 나간 요청 수와 사유 (성공·실패 모두 포함)
+            "fallback_requests": sum(1 for r in rows if r["fallbacks"]),
+            "fallback_reasons": Counter(x for r in rows for x in r["fallbacks"]),
+            # 개선 8 — 조치 승인 결정
+            "approval_decisions": Counter(a["decision"] for a in self.approvals(now - timedelta(hours=hours), 10**6)),
             "hourly": buckets,
         }
 

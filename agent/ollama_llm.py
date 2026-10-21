@@ -11,6 +11,7 @@ fc
 사전 조건: `ollama serve` 실행 중 + `ollama pull qwen3:0.6b qwen3:8b`.
 """
 import json
+import os
 import re
 from pathlib import Path
 
@@ -19,7 +20,8 @@ from langsmith import traceable
 
 from . import llm_http
 
-OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
+# OLLAMA_URL로 바꿀 수 있다 — 벤치마크에서 bench/mock_llm_server.py의 Ollama 호환 엔드포인트를 꽂을 때
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434/api/chat")
 
 
 def _load_known_systems() -> set[str]:
