@@ -22,7 +22,9 @@
 | 7 | 추가 | **LLM 장애 자동 대체** — OpenAI 장애 시 Ollama로 전환 + 서킷 브레이커 | OpenAI 장애 중 성공 **0/6 → 6/6**, 평균 응답 5.4s(대체만) → **2.9s**(브레이커) | `LLM_FALLBACK=off` |
 | 8 | 추가 | **조치 실행 전 사람 승인 (HITL)** — 제안 → `interrupt()` 승인 대기 → MCP로 실행 → 재조회 | 조치는 글로만 안내 → **승인 시 실행·정상화 확인** (`degraded → healthy`), 승인 없이 실행 **0건** | `REMEDIATION=off` |
 
-단위 테스트 **82개** (`tests/`), 평가·벤치마크 스크립트 5종 (`eval/`, `bench/`)
+단위 테스트 **82개** (`tests/`), 평가·벤치마크 스크립트 7종 (`eval/`, `bench/`, `sh/`)
+
+**답변 품질 (LLM-as-a-Judge, 18문항)**: 질문 적합성 3.83 → **4.28**, 실행 가능성 4.06 → **4.50**, 블라인드 쌍대 비교 개선 **7승** · 원본 2승 · 무 9 (→ [4-1](#4-1-답변-품질--llm-as-a-judge-evaljudge_evalpy))
 
 ---
 
@@ -213,6 +215,32 @@ gpt-4o-mini(분류·계획) + gpt-4o(답변 작성) + text-embedding-3-small, 20
 - 단위 테스트 58 passed, 6건 총 비용 $0.0146
 - 첫 실행은 `.env` 설정 실수로 키가 거부됐는데, 이때도 사용자에게 `LLM_AUTH` 안내 + runbook 검색 어휘 모드 자동 전환이 동작함 → [eval/scenario_openai_20261021_0923.md](eval/scenario_openai_20261021_0923.md)
 
+### 4-1. 답변 품질 — LLM-as-a-Judge (`eval/judge_eval.py`)
+
+위 지표들(runbook 포함률, 수치 조작 0건)은 코드로 셀 수 있는 것만 잽니다. **최종 답변이 실제로 더 쓸 만해졌는지**는
+LLM 심판으로 채점했습니다. 결과 원본: [eval/judge_results_20261021_1640.md](eval/judge_results_20261021_1640.md)
+
+- **비교 대상**: 같은 18문항(`runbook_cases.json`)을 같은 모델(gpt-4o)로 두 번 답변 생성
+  - 원본 설정: 키워드 규칙 runbook 선택 + 형식 검수 (`RUNBOOK_RETRIEVER=keyword`, `GROUNDING_CHECK=off`)
+  - 개선 설정: 하이브리드 RAG + 수치 근거 검증
+- **심판**: gpt-4o-mini, 정답 장애 유형을 참고로 주는 reference-guided 방식
+  - **개별 채점**: 질문 적합성 · 근거 일치 · 실행 가능성 1~5점
+  - **블라인드 쌍대 비교**: 어느 쪽이 개선본인지 숨기고 A/B로 보여 줌. **순서를 바꿔 두 번 물어 같은 쪽을 고른 경우만 승리**로 인정(위치 편향 제거)
+
+| 항목 | 원본 설정 | 개선 설정 |
+|---|---|---|
+| 질문 적합성 (relevance) | 3.83 | **4.28** |
+| 근거 일치 (groundedness) | 4.72 | 4.78 |
+| 실행 가능성 (actionability) | 4.06 | **4.50** |
+| 평균 응답 시간 | 5.3s | 5.3s |
+| 쌍대 비교 | 2승 | **7승** (무승부·판정 불일치 9) |
+
+- **좋아진 곳은 runbook이 바뀐 문항에 몰려 있음**: #7 DB 다운, #8 메모리 누수, #9 디스크, #10 타임아웃 — 원본은 엉뚱한 runbook(high-latency·db-down)을 받아 적합성 2~4점, 개선은 5점. runbook 포함률 33% → 94%가 답변 품질로 이어졌다는 근거
+- **근거 일치는 둘 다 높음**(4.72 → 4.78): gpt-4o는 원래 수치를 거의 지어내지 않아 근거 검증의 효과가 작음 — 4장의 "조작 0건"과 같은 결론
+- **나빠진 곳 2건**: #11은 하이브리드 검색이 정답(network-timeout) 대신 cpu-spike를 골라 적합성 4 → 2. #14는 runbook을 2개 붙이면서 실행 순서가 흐려져 원본이 이김. 둘 다 그대로 보고
+- **둘 다 낮은 곳**: #5 "web-01 CPU 급증"은 모니터링상 web-01이 정상이라 답변이 "이상 없음"으로 끝나 적합성 2점 — runbook보다 수집된 사실을 우선하는 동작이라 의도된 결과에 가까움
+- **한계**: 심판도 LLM이라 절대 점수보다 같은 심판으로 잰 **차이**를 봐야 함. 18문항은 runbook 가중치를 튜닝한 그 문항이라 개선 설정에 유리할 수 있음. 사람 채점과의 일치율은 확인하지 않음. 심판 비용 약 $0.014 (47k 토큰)
+
 ## 5. 평가 항목별 기술 요소
 
 | 기술 요소 | 이 프로젝트에서 |
@@ -223,6 +251,7 @@ gpt-4o-mini(분류·계획) + gpt-4o(답변 작성) + text-embedding-3-small, 20
 | 장애 대응 설계 | LLM 대체 + 서킷 브레이커(closed → open → half-open), fast/quality 브레이커 공유 |
 | 의존성 주입 | `SupervisorDeps.runbook_retriever`, 가짜 임베더·가짜 LLM으로 테스트 교체 |
 | LangSmith | `select_runbooks` 등 신규 단계 `@traceable`, 마스킹본만 기록 |
+| LLM-as-a-Judge | gpt-4o-mini 심판으로 원본/개선 답변 개별 채점(1~5) + 순서 교차 블라인드 쌍대 비교 |
 | 모듈화 | 기능별 신규 모듈 8개 (`guardrails`, `errors`, `runbook_retriever`, `llm_http`, `grounding`, `metrics_store`, `fallback_llm`, `remediation`) |
 | 단위 테스트 | 82개 — 한글 조사 경계·거짓 양성 같은 **실제로 겪은 버그의 회귀 테스트**, 브레이커 상태 전이, 승인 없이 실행되지 않음 포함 |
 | 재현 가능한 비교 | 개선 전 동작을 환경변수로 복원 (`RUNBOOK_RETRIEVER`, `LLM_HTTP_MODE`, `GROUNDING_CHECK`, `LLM_FALLBACK`, `REMEDIATION`) |
@@ -249,7 +278,8 @@ gpt-4o-mini(분류·계획) + gpt-4o(답변 작성) + text-embedding-3-small, 20
 
 - **승인 상태 영구 저장**: SQLite 체크포인터로 서버 재시작에도 승인 대기 유지, 조치 롤백 Tool, 승인자 개인 계정
 - **대체 품질 관리**: 보조 모델 답변에 근거 검증 기준 강화, 주 LLM 복구 시 자동 재작성 옵션
-- **평가 데이터 분리**: 튜닝용/검증용 문항을 나눠 과적합 없이 재측정, LLM-as-judge로 답변 품질 채점
+- **평가 데이터 분리**: 튜닝용/검증용 문항을 나눠 과적합 없이 재측정, LLM 심판 점수와 사람 채점의 일치율 확인
+- **멀티 에이전트 분리**: research를 모니터링·로그·runbook 전문 서브에이전트로 나누고 Supervisor가 조율
 - **운영 강화**: 지표 보존 기한·별도 DB, 관리자 계정·권한, GitHub Actions로 테스트 자동화
 
 ---
@@ -274,6 +304,8 @@ bash sh/run_frontend.sh         # http://localhost:8600 채팅, http://localhost
 | `bash sh/run_bench.sh` | 동기 vs 비동기 동시성 벤치마크 (가짜 LLM, 과금 없음) |
 | `python eval/grounding_eval.py [--limit N]` | 수치 근거 검증 off/on 비교 |
 | `python bench/fallback_bench.py` | LLM 장애 자동 대체 Before/After (가짜 OpenAI 장애 주입, 과금 없음) |
+| `LLM_BACKEND=openai python eval/judge_eval.py [--limit N]` | LLM-as-a-Judge 원본/개선 답변 품질 비교 (과금 약 $0.1) |
+| `python eval/regression_check.py` | 실행 중인 서버(8100)에 원본 회귀 쿼리 10개 실행 |
 | `bash sh/verify_openai.sh` | **OpenAI 최종 검증** — 테스트·정확도·대표 시나리오·관리자 지표·근거 검증 일괄 실행 (과금) |
 
 **개선 전 동작 재현용 환경변수**
@@ -312,4 +344,6 @@ web_demo_server.py         백엔드 다운 안내, 관리자 페이지·API 중
 tests/                     단위 테스트 82개                              (신규)
 eval/, bench/, sh/run_bench.sh, sh/verify_openai.sh  평가·벤치마크       (신규)
 bench/fallback_bench.py    LLM 대체 벤치마크, mock 서버에 장애 주입·Ollama 호환 추가 (신규·수정)
+eval/judge_eval.py         LLM-as-a-Judge 답변 품질 평가                  (신규)
+eval/regression_check.py   원본 회귀 쿼리 일괄 실행                       (신규)
 ```

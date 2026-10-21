@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
 os.environ.setdefault("LLM_BACKEND", "ollama")
 os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
+os.environ["REMEDIATION"] = "off"   # 개선 8의 승인 단계(체크포인터)는 이 평가와 무관 — 끄고 잰다
 
 from agent import grounding  # noqa: E402
 import server  # noqa: E402
